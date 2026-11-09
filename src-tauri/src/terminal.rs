@@ -23,6 +23,17 @@ const MAX_PER_PROFILE: usize = 16;
 const MAX_TOTAL: usize = 64;
 const MAX_CURSOR: u64 = 9_007_199_254_740_991;
 
+pub fn web_url(value: &str) -> Result<String, String> {
+    if value.len() > 32768 || value.chars().any(char::is_control) {
+        return Err("网页链接无效".into());
+    }
+    let url = reqwest::Url::parse(value.trim()).map_err(|_| "网页链接无效")?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err("仅支持打开 HTTP/HTTPS 网页链接。".into());
+    }
+    Ok(url.into())
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TerminalSession {
@@ -605,6 +616,29 @@ async fn write_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn web_links_allow_browser_urls_and_reject_other_handlers() {
+        for url in [
+            "https://example.com/a?b=c#d",
+            "http://localhost:8000/",
+            "https://example.com/中文",
+        ] {
+            assert!(web_url(url).is_ok());
+        }
+        for url in [
+            "javascript:alert(1)",
+            "file:///C:/Windows/cmd.exe",
+            "data:text/html,test",
+            "mailto:user@example.com",
+            "ssh://host",
+            "https://example.com/\n--arg",
+            "--command",
+            "https://",
+        ] {
+            assert!(web_url(url).is_err(), "{url}");
+        }
+    }
 
     #[test]
     fn ring_buffer_reports_truncation_and_reads_bounded_raw_bytes() {

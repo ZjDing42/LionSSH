@@ -92,6 +92,16 @@ test('release metadata covers native platforms and the separately signed portabl
   assert.deepEqual(metadata.platforms['windows-x86_64-nsis'], metadata.platforms['windows-x86_64']);
 });
 
+test('renamed official repository retains download URLs accepted by existing installations', async () => {
+  const version = '1.10.1';
+  const assets = requiredAssets(version).map((name, id) => ({ id, name, size: 4096 }));
+  for (const repository of ['ZjDing42/LionSSH', 'example/LionSSH']) {
+    const metadata = await makeUpdaterJson({ version, tag: `v${version}`, repository, assets, readSignature: async () => encodedSignature(version) });
+    const expected = repository === 'ZjDing42/LionSSH' ? 'ZjDing989/LionSSH' : repository;
+    for (const platform of Object.values(metadata.platforms)) assert.ok(platform.url.startsWith(`https://github.com/${expected}/releases/download/v${version}/`));
+  }
+});
+
 test('release finalization rejects missing architectures, empty assets and mismatched signed versions', async () => {
   const version = '1.7.0';
   const assets = requiredAssets(version).map((name, index) => ({ id: index + 1, name, size: 200 }));

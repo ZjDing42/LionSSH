@@ -92,6 +92,10 @@ async function makeUpdaterJson({ version, tag, repository, assets, readSignature
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) throw new Error('Invalid GitHub repository');
   const server = new URL(serverUrl);
   if (server.protocol !== 'https:') throw new Error('Updater downloads require HTTPS');
+  // Existing installations only allow the original repository path. GitHub
+  // redirects it after the rename, so keep that path in the signed update feed.
+  const downloadRepository = server.origin === 'https://github.com' && repository === 'ZjDing42/LionSSH'
+    ? 'ZjDing989/LionSSH' : repository;
   if (!Number.isFinite(Date.parse(publishedAt))) throw new Error('Invalid publication timestamp');
   const indexed = new Map();
   for (const asset of assets) {
@@ -107,7 +111,7 @@ async function makeUpdaterJson({ version, tag, repository, assets, readSignature
     const sigAsset = indexed.get(`${artifact.file}.sig`);
     if (sigAsset.size > 16384) throw new Error(`Updater signature asset is too large: ${sigAsset.name}`);
     const signature = signatureVersion(await readSignature(sigAsset), version);
-    const entry = { signature, url: `${server.origin}/${repository}/releases/download/${encodeURIComponent(tag)}/${encodeURIComponent(artifact.file)}` };
+    const entry = { signature, url: `${server.origin}/${downloadRepository}/releases/download/${encodeURIComponent(tag)}/${encodeURIComponent(artifact.file)}` };
     platforms[artifact.key] = entry;
     if (artifact.alias) platforms[artifact.alias] = entry;
   }

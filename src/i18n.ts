@@ -1,6 +1,7 @@
 import { ref } from 'vue';
 import type { LanguagePreference, LanguageState } from './types';
 import { terminalTranslations } from './terminal-i18n';
+import { fileTranslations } from './file-i18n';
 import { backendMessage } from './backend-messages';
 
 /** A Chinese system locale uses Chinese; every other locale falls back to English. */
@@ -285,7 +286,6 @@ const translations: Record<string, string> = {
   '监听已建立 · 未验证': 'Listening · Not verified',
   '监听已建立 · 检测中': 'Listening · Checking',
   '监听端口': 'Bind port',
-  '监测待命': 'Monitoring on standby',
   '目录': 'Directory',
   '目标不可用': 'Target unavailable',
   '目标地址': 'Target address',
@@ -332,7 +332,6 @@ const translations: Record<string, string> = {
   '自动检测已暂停，可手动刷新': 'Automatic checks paused; refresh manually',
   '自动检测显卡': 'Detect GPUs automatically',
   '自动监测 NVIDIA 显卡': 'Monitor NVIDIA GPUs automatically',
-  '自动监测已开启': 'Automatic monitoring enabled',
   '节点列表': 'Node list',
   '节点数': 'Nodes',
   '认证方式': 'Authentication',
@@ -412,6 +411,7 @@ const translations: Record<string, string> = {
   '，请查看系统日志中的未清理项目': '; check the system log for remaining items',
   '？': '?',
   ...terminalTranslations,
+  ...fileTranslations,
 };
 
 /** Translate UI messages only. User names, paths and terminal output are never translation keys. */

@@ -40,4 +40,7 @@ export const terminalTranslations: Record<string, string> = {
   '终端输入较多，请等待服务器处理后重试。': 'Too much terminal input is queued. Wait for the server to process it and try again.',
   '较早的输出已超出缓冲范围': 'Earlier output is no longer available in the buffer',
   '终端 {title}': 'Terminal {title}',
+  '仅支持打开 HTTP/HTTPS 网页链接。': 'Only HTTP/HTTPS web links can be opened.',
+  '当前界面无法打开外部链接。': 'This window cannot open external links.',
+  '打开链接失败：{error}': 'Could not open link: {error}',
 };

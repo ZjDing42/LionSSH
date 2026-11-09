@@ -24,6 +24,7 @@ type Sink = Arc<dyn Fn(&str, Value) + Send + Sync>;
 type Reply = Result<Value, String>;
 
 pub const PUBLIC_METHODS: &[&str] = &[
+    "files",
     "initial",
     "set-theme",
     "set-language",
@@ -165,6 +166,7 @@ pub struct Service {
     operations: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
     startup_restored: AsyncMutex<bool>,
     terminals: TerminalManager,
+    pub files: Arc<crate::files::FileManager>,
     theme: Mutex<String>,
     theme_preference: Mutex<Option<String>>,
     system_language: &'static str,
@@ -255,6 +257,7 @@ impl Service {
             operations: Mutex::new(HashMap::new()),
             startup_restored: AsyncMutex::new(false),
             terminals: TerminalManager::new(),
+            files: crate::files::FileManager::new(),
             theme: Mutex::new(resolved.into()),
             theme_preference: Mutex::new(None),
             system_language: locale::system_language(),
@@ -291,6 +294,24 @@ impl Service {
             .as_ref()
             .ok_or("配置未就绪")?
             .get(id)
+    }
+
+    pub fn file_connection(&self, id: &str) -> Result<Arc<Connection>, String> {
+        let device = self.connected(id)?;
+        let connection = device
+            .connection
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or("请先连接设备")?;
+        if connection.is_closed() {
+            return Err("SSH 连接已关闭".into());
+        }
+        Ok(connection)
+    }
+
+    pub fn file_event(&self, payload: Value) {
+        (self.sink)("lion:files", payload);
     }
 
     fn operation_lock(&self, id: &str) -> Arc<AsyncMutex<()>> {
@@ -797,6 +818,18 @@ impl Service {
     }
 
     pub async fn request(self: &Arc<Self>, method: &str, args: Vec<Value>) -> Reply {
+        if method == "files" {
+            if self.quitting.load(Ordering::SeqCst) {
+                return Err("应用正在关闭".into());
+            }
+            if args.len() != 2 {
+                return Err("文件操作参数格式不正确".into());
+            }
+            return self
+                .files
+                .request(self, string_argument(&args, 0, "文件操作")?, &args[1])
+                .await;
+        }
         if method == "shutdown" {
             self.shutdown().await;
             return Ok(Value::Null);
@@ -1227,6 +1260,7 @@ impl Service {
     }
     pub async fn shutdown(&self) {
         self.quitting.store(true, Ordering::SeqCst);
+        self.files.stop();
         self.terminals.shutdown().await;
         (self.sink)(
             "lion:shutdown",

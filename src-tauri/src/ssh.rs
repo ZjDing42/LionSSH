@@ -788,6 +788,95 @@ impl Connection {
         self.shared.reason("SSH 连接中断")
     }
 
+    async fn sftp_channel(&self) -> Result<Channel<client::Msg>, String> {
+        let handle = self.handle.clone();
+        let closed = self.shared.closed.clone();
+        let permit = self
+            .terminal_opens
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| "正在打开过多 SSH 通道，请稍后重试")?;
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let _permit = permit;
+            let result = tokio::select! {
+                _ = closed.cancelled() => return,
+                result = handle.channel_open_session() => result,
+            };
+            if let Err(Ok(channel)) = sender.send(result) {
+                let _ = channel.close().await;
+            }
+        });
+        let mut channel = timeout(CHANNEL_TIMEOUT, receiver)
+            .await
+            .map_err(|_| "SFTP 通道建立超时")?
+            .map_err(|_| "SSH 连接已关闭")?
+            .map_err(|e| e.to_string())?;
+        let setup = async {
+            channel
+                .request_subsystem(true, "sftp")
+                .await
+                .map_err(|e| e.to_string())?;
+            loop {
+                match channel.wait().await {
+                    Some(ChannelMsg::Success) => return Ok(()),
+                    Some(ChannelMsg::Failure | ChannelMsg::Close | ChannelMsg::Eof) | None => {
+                        return Err("服务器未提供 SFTP 子系统".into());
+                    }
+                    _ => {}
+                }
+            }
+        };
+        let result = tokio::select! {
+            _ = self.shared.closed.cancelled() => Err("SSH 连接已关闭".into()),
+            result = timeout(CHANNEL_TIMEOUT, setup) => result.unwrap_or_else(|_| Err("SFTP 初始化超时".into())),
+        };
+        if let Err(error) = result {
+            let _ = timeout(Duration::from_secs(1), channel.close()).await;
+            return Err(error);
+        }
+        Ok(channel)
+    }
+
+    pub async fn open_sftp(&self) -> Result<russh_sftp::client::SftpSession, String> {
+        let channel = self.sftp_channel().await?;
+        timeout(
+            CHANNEL_TIMEOUT,
+            russh_sftp::client::SftpSession::new(channel.into_stream()),
+        )
+        .await
+        .map_err(|_| "SFTP 初始化超时")?
+        .map_err(|e| e.to_string())
+    }
+
+    pub async fn replace_sftp(&self, from: &str, to: &str) -> Result<(), String> {
+        // OpenSSH's extension atomically replaces the destination. Never unlink the old file first.
+        let channel = self.sftp_channel().await?;
+        let session = russh_sftp::client::RawSftpSession::new(channel.into_stream());
+        let version = session.init().await.map_err(|e| e.to_string())?;
+        if !version.extensions.contains_key("posix-rename@openssh.com") {
+            return Err("服务器不支持安全替换文件，原文件已保留；请选择保留两份".into());
+        }
+        let mut payload = Vec::new();
+        for path in [from, to] {
+            payload.extend_from_slice(&(path.len() as u32).to_be_bytes());
+            payload.extend_from_slice(path.as_bytes());
+        }
+        let result = session
+            .extended("posix-rename@openssh.com", payload)
+            .await
+            .map_err(|e| e.to_string())?;
+        match result {
+            russh_sftp::protocol::Packet::Status(status)
+                if status.status_code == russh_sftp::protocol::StatusCode::Ok =>
+            {
+                Ok(())
+            }
+            russh_sftp::protocol::Packet::Status(status) => Err(status.error_message),
+            _ => Err("服务器返回了无效的文件替换响应".into()),
+        }
+    }
+
     /// Keep late confirmations alive long enough to close them explicitly.
     /// Both per-transport and global permits bound these pending opens even
     /// if a server never acknowledges a channel request.

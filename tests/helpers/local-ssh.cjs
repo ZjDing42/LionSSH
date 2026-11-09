@@ -177,6 +177,7 @@ async function localSshServer(options = {}) {
       stats.authenticated++;
       client.on('session', (accept) => {
         const session = accept();
+        if (options.sftpRoot) session.on('sftp', acceptSftp => require('./sftp.cjs').serveSftp(acceptSftp(), options.sftpRoot, options, stats));
         let terminal;
         session.on('pty', (acceptPty, reject, info) => {
           if (!options.terminalEnabled || options.terminalRejectPty) return reject?.();
@@ -375,6 +376,7 @@ async function localSshServer(options = {}) {
     setJobResponse(value) { jobResponse = value; },
     setStorageResponse(value) { storageResponse = value; },
     setPassword(value) { password = value; },
+    setSftpFailure(value) { options.sftpFailWrite = value; },
     disconnectClients() { for (const client of clients) client.end(); },
     async close() {
       for (const timer of deliveryTimers) clearTimeout(timer);

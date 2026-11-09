@@ -67,7 +67,7 @@ pub async fn run() -> Result<(), String> {
         let Some(line) = line else {
             break;
         };
-        if line.len() > 2 * 1024 * 1024 {
+        if line.len() > crate::FILE_SAVE_REQUEST_LIMIT + 1024 {
             return Err("验证请求过长".into());
         }
         let request: Value = serde_json::from_str(&line).map_err(|e| e.to_string())?;
@@ -78,7 +78,11 @@ pub async fn run() -> Result<(), String> {
             let id = request["id"].clone();
             let method = request["method"].as_str().unwrap_or("");
             let args = request["args"].as_array().cloned().unwrap_or_default();
-            let response = match service.request(method, args).await {
+            let result = match crate::validate_request_size(method, &args) {
+                Ok(()) => service.request(method, args).await,
+                Err(error) => Err(error),
+            };
+            let response = match result {
                 Ok(result) => json!({"id":id,"result":result}),
                 Err(error) => json!({"id":id,"error":error}),
             };

@@ -330,6 +330,42 @@ test('storage scan, guarded cleanup preview, root UID rejection and one-use toke
   assert.deepEqual(ssh.stats.rejectedCommands, []);
 });
 
+test('skipped storage roots contribute zero; genuine scan errors retain warnings and refresh restores usage', integration, async t => {
+  let scan = SCAN.replace('TMP\t8192\t4\t3\t0', 'TMP\t0\t0\t0\t256');
+  const { backend, ssh } = await fixture(t, { storageResponse: command => command === commands.storage.scan ? scan : storageResponse(command) });
+  const input = profile(ssh, { autoReconnect: false }); await connect(backend, input);
+  const missing = (await monitors(backend, input.id)).storage;
+  assert.equal(missing.tmpBytes, null);
+  assert.equal(missing.totalBytes, missing.homeBytes);
+  assert.equal(missing.partial, false);
+  assert.deepEqual(missing.warnings, []);
+  scan = SCAN.replace('HOME\t4096\t3\t2\t0', 'HOME\t0\t0\t0\t256');
+  await backend.invoke('refresh-storage', input.id);
+  const skippedHome = (await monitors(backend, input.id)).storage;
+  assert.equal(skippedHome.homeBytes, null);
+  assert.equal(skippedHome.totalBytes, 8192);
+  assert.equal(skippedHome.partial, false);
+  assert.deepEqual(skippedHome.warnings, []);
+  scan = SCAN.replace('TMP\t8192\t4\t3\t0', 'TMP\t0\t0\t0\t1');
+  await backend.invoke('refresh-storage', input.id);
+  const unreadable = (await monitors(backend, input.id)).storage;
+  assert.equal(unreadable.tmpBytes, null);
+  assert.equal(unreadable.totalBytes, unreadable.homeBytes);
+  assert.equal(unreadable.partial, false);
+  assert.deepEqual(unreadable.warnings, []);
+  scan = SCAN.replace('TMP\t8192\t4\t3\t0', 'TMP\t512\t1\t1\t1');
+  await backend.invoke('refresh-storage', input.id);
+  const partial = (await monitors(backend, input.id, s => s.storage.tmpBytes === 512)).storage;
+  assert.equal(partial.partial, true);
+  assert.equal(partial.warnings.length, 1);
+  scan = SCAN;
+  await backend.invoke('refresh-storage', input.id);
+  const restored = (await monitors(backend, input.id, s => s.storage.tmpBytes === 8192)).storage;
+  assert.equal(restored.partial, false);
+  assert.deepEqual(restored.warnings, []);
+  assert.equal(restored.totalBytes, 12288);
+});
+
 test('disconnect cancels a stalled remote query promptly and invalidates confirmations across reconnects', integration, async t => {
   const { backend, ssh } = await fixture(t, { jobResponse: command => command === commands.jobs['4201'].info ? jobRecord('4201') : { hang: true } });
   const input = profile(ssh, { autoReconnect: false }); await connect(backend, input); await monitors(backend, input.id);

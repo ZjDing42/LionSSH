@@ -191,8 +191,7 @@ watch(() => props.profiles.map(item => item.id), ids => {
 
 <template>
   <section ref="workspaceRoot" class="terminal-page" data-testid="terminal-page">
-    <div class="tool-page-toolbar"><button class="button secondary small" data-testid="terminal-back" @click="$emit('back')"><Icon name="back" :size="16" />{{ t('返回工作台') }}</button><span>{{ t('小工具 / 终端') }}</span></div>
-    <header class="page-header terminal-page-header"><h1>{{ t('终端') }}<span class="title-dot">.</span></h1><div v-if="profile" class="terminal-server-label"><Icon name="server" :size="16" /><strong>{{ profile.name }}</strong><span>{{ profile.username }}@{{ profile.host }}:{{ profile.port }}</span></div></header>
+    <div class="tool-page-toolbar"><button class="button secondary small" data-testid="terminal-back" @click="$emit('back')"><Icon name="back" :size="16" />{{ t('返回工作台') }}</button></div>
     <div v-if="profile && !connected" class="terminal-connection-note" data-testid="terminal-connection-note" role="status"><Icon name="info" :size="16" /><span>{{ t('服务器尚未连接，已有终端会保留。') }}</span><button v-if="!connectionActive" class="button secondary small" :disabled="disabled" @click="$emit('connect')"><Icon name="link" :size="14" />{{ t('连接设备') }}</button><span v-else>{{ t(props.states[profileId]?.status === 'disconnecting' ? '正在断开连接' : '正在连接') }}</span></div>
     <div v-if="group?.error" class="terminal-error" data-testid="terminal-error" role="alert"><Icon name="alert" :size="16" /><span>{{ message(group.error) }}</span><button v-if="group.loadFailed && available" class="text-button" data-testid="terminal-retry" @click="retryLoad">{{ t('重试') }}</button><button v-else class="icon-button" :aria-label="t('关闭终端提示')" @click="group.error = ''"><Icon name="close" :size="15" /></button></div>
     <div class="terminal-workspace card">

@@ -1,6 +1,14 @@
 <script setup lang="ts">
 withDefaults(defineProps<{ name: string; size?: number }>(), { size: 20 });
 const paths: Record<string, string[]> = {
+  file: ['M5 3h9l5 5v13H5z', 'M14 3v6h5'],
+  upload: ['M12 16V3m-5 5 5-5 5 5M4 16v5h16v-5'],
+  'folder-plus': ['M3 7V4h6l3 3h9v13H3z', 'M12 10v7m-3-3h6'],
+  'file-plus': ['M5 3h9l5 5v13H5z', 'M12 11v7m-3-3h6'],
+  copy: ['M8 8h13v13H8z', 'M16 8V3H3v13h5'],
+  paste: ['M8 5H4v17h16V5h-4', 'M8 2h8v6H8z'],
+  save: ['M3 3h15l3 3v15H3z', 'M7 3v6h10V3M7 21v-8h10v8'],
+  up: ['M12 21V3m-7 7 7-7 7 7'],
   plus: ['M12 5v14M5 12h14'],
   close: ['m6 6 12 12M18 6 6 18'],
   server: ['M5 3h14a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2ZM5 13h14a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4a2 2 0 0 1 2-2Z', 'M7 7h.01M7 17h.01M11 7h6M11 17h6'],

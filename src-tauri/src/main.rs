@@ -2,6 +2,9 @@
 
 mod codex;
 mod crypto;
+mod file_drag;
+mod file_drop;
+mod files;
 mod locale;
 mod model;
 mod monitor;
@@ -10,6 +13,7 @@ mod service;
 mod ssh;
 mod store;
 mod terminal;
+mod transfers;
 mod updater;
 mod verification;
 
@@ -35,6 +39,21 @@ fn show_window(app: &tauri::AppHandle) {
     }
 }
 
+// JSON escaping can use six bytes per text byte, plus the file metadata.
+const FILE_SAVE_REQUEST_LIMIT: usize = files::TEXT_LIMIT * 6 + 64 * 1024;
+
+fn validate_request_size(method: &str, args: &[Value]) -> Result<(), String> {
+    let limit = if method == "files" && args.first().and_then(Value::as_str) == Some("save") {
+        FILE_SAVE_REQUEST_LIMIT
+    } else {
+        2 * 1024 * 1024
+    };
+    if args.len() > 4 || serde_json::to_vec(args).map_err(|_| "请求格式无效")?.len() > limit {
+        return Err("请求内容过长".into());
+    }
+    Ok(())
+}
+
 #[tauri::command]
 async fn lion_request(
     window: tauri::WebviewWindow,
@@ -49,11 +68,7 @@ async fn lion_request(
     if state.quitting.load(Ordering::SeqCst) {
         return Err("应用正在关闭".into());
     }
-    if args.len() > 4
-        || serde_json::to_vec(&args).map_err(|_| "请求格式无效")?.len() > 2 * 1024 * 1024
-    {
-        return Err("请求内容过长".into());
-    }
+    validate_request_size(&method, &args)?;
     if [
         "get-update-state",
         "check-update",
@@ -70,7 +85,7 @@ async fn lion_request(
             "open-update-download" => app
                 .opener()
                 .open_url(
-                    "https://github.com/ZjDing989/LionSSH/releases/latest",
+                    "https://github.com/ZjDing42/LionSSH/releases/latest",
                     None::<&str>,
                 )
                 .map(|_| Value::Null)
@@ -105,6 +120,80 @@ async fn lion_request(
                 }
             }
         };
+    }
+    if method == "open-web-link" {
+        if args.len() != 1 {
+            return Err("网页链接参数无效".into());
+        }
+        let url = terminal::web_url(args[0].as_str().ok_or("网页链接参数无效")?)?;
+        return app
+            .opener()
+            .open_url(url, None::<&str>)
+            .map(|_| Value::Null)
+            .map_err(|error| error.to_string());
+    }
+    if method == "files-drop-region" {
+        if args.len() != 1 {
+            return Err("拖放区域参数无效".into());
+        }
+        let region = serde_json::from_value(args[0].clone()).map_err(|_| "拖放区域参数无效")?;
+        app.state::<Arc<file_drop::DropState>>().update(region)?;
+        return Ok(Value::Null);
+    }
+    if method == "files-drag" {
+        if args.len() != 1 {
+            return Err("拖放参数无效".into());
+        }
+        let sources = serde_json::from_value(args[0].clone()).map_err(|_| "拖放来源无效")?;
+        file_drag::start(window, state.inner().clone(), sources).await?;
+        return Ok(Value::Null);
+    }
+    if method == "files-dialog" {
+        if args.len() != 1 {
+            return Err("文件选择参数无效".into());
+        }
+        let kind = args[0].as_str().ok_or("文件选择参数无效")?;
+        let mut dialog = rfd::AsyncFileDialog::new();
+        if kind == "download" {
+            if let Some(directory) = state.files.download_directory.lock().unwrap().clone() {
+                dialog = dialog.set_directory(directory);
+            }
+        }
+        let selected = match kind {
+            "upload-files" => {
+                dialog
+                    .set_title(locale::text(
+                        state.resolved_language(),
+                        "选择上传文件",
+                        "Select files to upload",
+                    ))
+                    .pick_files()
+                    .await
+            }
+            "upload-folder" | "download" => dialog
+                .set_title(locale::text(
+                    state.resolved_language(),
+                    "选择文件夹",
+                    "Select a folder",
+                ))
+                .pick_folder()
+                .await
+                .map(|f| vec![f]),
+            _ => return Err("不支持的文件选择操作".into()),
+        };
+        if kind == "download" {
+            if let Some(folder) = selected.as_ref().and_then(|s| s.first()) {
+                *state.files.download_directory.lock().unwrap() = Some(folder.path().to_path_buf());
+            }
+        }
+        return Ok(selected
+            .map(|paths| {
+                serde_json::json!(paths
+                    .iter()
+                    .map(|f| f.path().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>())
+            })
+            .unwrap_or(Value::Null));
     }
     if method == "pick-key" {
         if !args.is_empty() {
@@ -242,8 +331,8 @@ fn main() {
             let data_dir = service::data_directory().map_err(std::io::Error::other)?;
             let config = app.config().app.windows.first().ok_or("主窗口配置缺失")?;
             let window = WebviewWindowBuilder::from_config(app, config)?
-                .data_directory(data_dir.join("webview"))
                 .disable_drag_drop_handler()
+                .data_directory(data_dir.join("webview"))
                 .initialization_script(
                     "document.addEventListener('contextmenu', (event) => event.preventDefault(), { capture: true });",
                 )
@@ -256,6 +345,7 @@ fn main() {
                             && url.port() == Some(1420))
                 })
                 .build()?;
+            file_drop::install(&window).map_err(std::io::Error::other)?;
             #[cfg(windows)]
             window.with_webview(|webview| unsafe {
                 // Also suppress WebView2's native menus, including before the app mounts.
@@ -312,6 +402,7 @@ fn main() {
                 return;
             };
             match event {
+                tauri::WindowEvent::Destroyed => file_drop::uninstall(window),
                 tauri::WindowEvent::CloseRequested { api, .. } => {
                     if service.finished.load(Ordering::SeqCst) {
                         return;

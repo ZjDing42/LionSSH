@@ -18,7 +18,7 @@ use tauri_plugin_updater::{Update, UpdaterExt};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
 
-const ENDPOINT: &str = "https://github.com/ZjDing989/LionSSH/releases/latest/download/latest.json";
+const ENDPOINT: &str = "https://github.com/ZjDing42/LionSSH/releases/latest/download/latest.json";
 const HOUR: Duration = Duration::from_secs(3600);
 const MAX_ARCHIVE: usize = 256 * 1024 * 1024;
 const MAX_EXTRACTED: u64 = 512 * 1024 * 1024;
@@ -108,7 +108,7 @@ impl UpdateManager {
                 json!({"status":"idle","currentVersion":env!("CARGO_PKG_VERSION"),
                 "version":null,"notes":null,"publishedAt":null,"error":null,"downloaded":0,"total":null,
                 "lastChecked":null,"nextCheckAt":null,"portable":portable,"configured":configured(),
-                "manualOnly":manual_only,"releaseUrl":"https://github.com/ZjDing989/LionSSH/releases/latest"}),
+                "manualOnly":manual_only,"releaseUrl":"https://github.com/ZjDing42/LionSSH/releases/latest"}),
             ),
             pending: Mutex::new(None),
             operation: AsyncMutex::new(()),
@@ -361,7 +361,13 @@ impl Drop for PreparedUpdate {
 }
 
 fn validate_release_url(value: &str) -> Result<(), String> {
-    if !value.starts_with("https://github.com/ZjDing989/LionSSH/releases/download/") {
+    if ![
+        "https://github.com/ZjDing42/LionSSH/releases/download/",
+        "https://github.com/ZjDing989/LionSSH/releases/download/",
+    ]
+    .iter()
+    .any(|prefix| value.starts_with(prefix))
+    {
         return Err("更新包地址不属于 LionSSH 官方 GitHub Release".into());
     }
     Ok(())
@@ -1128,7 +1134,15 @@ mod tests {
     #[test]
     fn validates_release_source_and_semver() {
         assert!(validate_release_url(
-            "https://github.com/ZjDing989/LionSSH/releases/download/v1.7.0/update.zip"
+            "https://github.com/ZjDing989/LionSSH/releases/download/v1.10.1/update.zip"
+        )
+        .is_ok());
+        assert!(validate_release_url(
+            "https://github.com/someone/LionSSH/releases/download/v1.10.1/update.zip"
+        )
+        .is_err());
+        assert!(validate_release_url(
+            "https://github.com/ZjDing42/LionSSH/releases/download/v1.7.0/update.zip"
         )
         .is_ok());
         assert!(validate_release_url(

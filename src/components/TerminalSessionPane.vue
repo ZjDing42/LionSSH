@@ -2,6 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
 import type { LionApi, TerminalSession } from '../types';
 import { message, t } from '../i18n';
@@ -40,6 +41,16 @@ let clipboardGeneration = 0;
 const pendingRenders = new Set<() => void>();
 
 function cleanError(error: unknown) { return (error instanceof Error ? error.message : String(error)).replace(/^Error:\s*/, ''); }
+function openWebLink(event: MouseEvent, value: string) {
+  event.preventDefault();
+  if (!event.isTrusted || event.button !== 0 || disposed || !props.active) return;
+  try {
+    const url = new URL(value);
+    if (!['http:', 'https:'].includes(url.protocol)) throw Error(t('仅支持打开 HTTP/HTTPS 网页链接。'));
+    if (!props.api?.openWebLink) throw Error(t('当前界面无法打开外部链接。'));
+    void props.api.openWebLink(url.href).catch(error => { if (!disposed) emit('error', t('打开链接失败：{error}', { error: cleanError(error) })); });
+  } catch (error) { emit('error', cleanError(error)); }
+}
 function applyCursorMotion() {
   if (terminal) terminal.options.cursorBlink = !reducedMotion.matches;
 }
@@ -173,11 +184,11 @@ onMounted(() => {
     theme: { background: '#080c12', foreground: '#e5eaf2', cursor: '#b4d0ff', cursorAccent: '#080c12', selectionBackground: '#3e608c99', black: '#1b2330', red: '#ed8796', green: '#8cd4ae', yellow: '#e9c58d', blue: '#85acf4', magenta: '#c7a0ed', cyan: '#8bd7df', white: '#d5dce8', brightBlack: '#7b879b', brightRed: '#f7a7b2', brightGreen: '#b0e7c9', brightYellow: '#f4dca9', brightBlue: '#b4ccff', brightMagenta: '#dbbdf5', brightCyan: '#b3e9ee', brightWhite: '#ffffff' },
     disableStdin: !writable.value,
     rightClickSelectsWord: false,
-    // Escape sequences may render links but never open URLs or a local program.
-    linkHandler: { activate: () => {} },
+    linkHandler: { activate: openWebLink, allowNonHttpProtocols: false },
   });
   fitAddon = new FitAddon();
   terminal.loadAddon(fitAddon);
+  terminal.loadAddon(new WebLinksAddon(openWebLink));
   terminal.open(surface.value);
   reducedMotion.addEventListener('change', applyCursorMotion);
   terminal.onData(data => sendBytes(new TextEncoder().encode(data)));

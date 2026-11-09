@@ -1,6 +1,6 @@
 {
   "name": "lion-ssh",
-  "version": "1.9.6",
+  "version": "1.10.1",
   "description": "SSH connections, tunnels and server monitoring in one desktop workspace",
   "author": "Lion SSH contributors",
   "private": true,
@@ -13,7 +13,7 @@
     "prepare:licenses": "node scripts/licenses.cjs",
     "tauri": "node scripts/tauri.cjs",
     "test": "node scripts/test.cjs",
-    "test:ui": "npm run build:frontend && node scripts/gpu-ui-smoke.cjs && node scripts/slurm-ui-smoke.cjs && node scripts/ui-actions-smoke.cjs && node scripts/codex-ui-smoke.cjs && node scripts/terminal-ui-smoke.cjs && node scripts/language-ui-smoke.cjs",
+    "test:ui": "npm run build:frontend && node scripts/gpu-ui-smoke.cjs && node scripts/slurm-ui-smoke.cjs && node scripts/ui-actions-smoke.cjs && node scripts/codex-ui-smoke.cjs && node scripts/terminal-ui-smoke.cjs && node scripts/language-ui-smoke.cjs && node scripts/files-ui-smoke.cjs",
     "smoke": "node scripts/desktop-smoke.cjs",
     "smoke:connections": "node scripts/connection-gpu-desktop-smoke.cjs",
     "smoke:data": "node scripts/data-directory-smoke.cjs",
@@ -22,9 +22,12 @@
     "dist:win": "node scripts/package.cjs"
   },
   "dependencies": {
+    "@codemirror/language-data": "^6.5.2",
     "@tauri-apps/api": "2.12.4",
     "@xterm/addon-fit": "0.11.0",
+    "@xterm/addon-web-links": "0.12.0",
     "@xterm/xterm": "6.0.0",
+    "codemirror": "^6.0.2",
     "vue": "^3.5.22"
   },
   "devDependencies": {
@@ -43,6 +46,6 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/ZjDing989/LionSSH.git"
+    "url": "https://github.com/ZjDing42/LionSSH.git"
   }
 }

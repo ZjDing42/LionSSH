@@ -23,6 +23,33 @@ async function verifyContextMenuTarget(target) {
   }), { prevented: true, bubbled: true }, 'browser menus are suppressed without blocking event propagation');
 }
 
+async function verifyTerminalLinks(page, id) {
+  const plain = 'https://example.com/path?mode=1';
+  await page.evaluate(({ id, text }) => window.terminalMock.emitOutput(id, text), { id, text: `\r\n${plain}\r\n\x1b]8;;https://example.org/osc8\x1b\\OPEN_SITE\x1b]8;;\x1b\\\r\n$ ` });
+  const clickLink = async marker => {
+    const position = await page.waitForFunction(({ id, marker }) => {
+      const nodes = document.createTreeWalker(document.querySelector(`[data-terminal-id="${id}"] .xterm-rows`), NodeFilter.SHOW_TEXT);
+      for (let node = nodes.nextNode(); node; node = nodes.nextNode()) {
+        const start = node.textContent.indexOf(marker); if (start < 0) continue;
+        const range = document.createRange(); range.setStart(node, start + 1); range.setEnd(node, start + 3);
+        const r = range.getBoundingClientRect(); if (r.width && r.height) return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+      }
+      return false;
+    }, { id, marker });
+    const { x, y } = await position.jsonValue();
+    await page.mouse.move(x, y);
+    await page.waitForFunction(() => Boolean(document.querySelector('.xterm-cursor-pointer')));
+    await page.mouse.click(x, y);
+  };
+  assert.equal(await page.evaluate(() => window.terminalMock.calls.filter(c => c[0] === 'openWebLink').length), 0, 'output alone cannot open a browser');
+  await clickLink('https://example.com');
+  await page.waitForFunction(() => window.terminalMock.calls.some(c => c[0] === 'openWebLink'));
+  await clickLink('OPEN_SITE');
+  await page.waitForFunction(() => window.terminalMock.calls.filter(c => c[0] === 'openWebLink').length === 2);
+  assert.deepEqual(await page.evaluate(() => window.terminalMock.calls.filter(c => c[0] === 'openWebLink').map(c => c[1])), [plain, 'https://example.org/osc8']);
+  assert.equal(page.url(), 'https://lion-terminal.test/');
+}
+
 (async () => {
   await fs.mkdir(output, { recursive: true });
   const browser = await chromium.launch({ headless: true, channel: 'chrome', args: ['--allow-file-access-from-files'] });
@@ -99,6 +126,7 @@ async function verifyContextMenuTarget(target) {
         onTheme: callback => { onTheme = callback; return () => {}; },
         onHostKey: () => () => {}, onShutdown: () => () => {},
         setTheme: async preference => { const value = { preference, resolved: preference }; onTheme(value); return value; },
+        openWebLink: async url => { mock.calls.push(['openWebLink', url]); },
         listTerminals: async profileId => {
           mock.calls.push(['list', profileId]);
           if (mock.failList === profileId) { mock.failList = ''; throw Error('模拟终端列表加载失败'); }
@@ -154,8 +182,9 @@ async function verifyContextMenuTarget(target) {
       return result;
     };
     await probe(firstId);
+    await verifyTerminalLinks(page, firstId);
     await verifyContextMenuTarget(page.locator('html'));
-    await verifyContextMenuTarget(page.locator('.terminal-page-header'));
+    await verifyContextMenuTarget(page.locator('.terminal-page .tool-page-toolbar'));
     await page.getByTestId('terminal-add').click();
     await page.waitForFunction(() => document.querySelectorAll('[data-testid="terminal-tab"]').length === 2);
     await page.getByTestId('terminal-add').click();

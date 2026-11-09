@@ -9,7 +9,7 @@ const { pathToFileURL } = require('node:url');
 const root = path.resolve(__dirname, '..');
 
 async function fixture(page) {
-  await page.addInitScript(() => {
+  await page.addInitScript(version => {
     const now = Date.now();
     const languageState = () => {
       const preference = localStorage.getItem('fixture-language') || 'system';
@@ -39,7 +39,7 @@ async function fixture(page) {
     const encode = bytes => btoa(String.fromCharCode(...bytes));
     let onLanguage = () => {};
     window.lion = {
-      getInitial: async () => ({ profiles, states: [structuredClone(state)], version: '1.9.0', theme: { preference: 'dark', resolved: 'dark' }, language: languageState() }),
+      getInitial: async () => ({ profiles, states: [structuredClone(state)], version, theme: { preference: 'dark', resolved: 'dark' }, language: languageState() }),
       setLanguage: async preference => { localStorage.setItem('fixture-language', preference); const next = languageState(); onLanguage(next); return next; },
       onLanguage: callback => { onLanguage = callback; return () => {}; },
       setTheme: async preference => ({ preference, resolved: preference === 'system' ? 'dark' : preference }),
@@ -66,7 +66,7 @@ async function fixture(page) {
       },
       closeTerminal: async (_profileId, id) => { terminals.splice(terminals.findIndex(item => item.id === id), 1); delete outputs[id]; },
     };
-  });
+  }, JSON.parse(await fs.readFile(path.join(root, 'package.json'), 'utf8')).version);
 }
 
 async function verifyTerminalLanguage(page) {
@@ -141,7 +141,7 @@ async function main() {
       await page.waitForFunction(expected => document.documentElement.lang === expected, expected);
       assert.equal(await select.inputValue(), 'system');
       const body = await page.locator('body').innerText();
-      assert(locale.startsWith('zh') ? body.includes('连接工作台') : /workspace/i.test(body), `default language for ${locale}`);
+      assert(locale.startsWith('zh') ? body.includes('我的设备') : body.includes('My devices'), `default language for ${locale}`);
       if (!locale.startsWith('zh')) {
         const visibleChinese = body.split('\n').filter(line => /[\u4e00-\u9fff]/u.test(line) && !['中文', '简体中文'].includes(line.trim()));
         assert.deepEqual(visibleChinese, [], `English workspace contains untranslated UI: ${visibleChinese.join('; ')}`);

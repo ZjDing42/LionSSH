@@ -200,6 +200,12 @@ export interface UpdateState {
 }
 
 export interface LionApi {
+  fileRequest?<T = unknown>(action: string, args: Record<string, unknown>): Promise<T>;
+  fileDialog?(kind: 'upload-files' | 'upload-folder' | 'download'): Promise<string[] | null>;
+  onFiles?(callback: (event: import('./file-types').FileTransfer | { removed: string }) => void): () => void;
+  onFileDrop?(callback: (event: import('./file-types').FileDrop) => void): () => void;
+  dragFiles?(sources: import('./file-types').FileLocation[]): Promise<void>;
+  setFileDropRegion?(region: import('./file-types').FileDropRegion | null): Promise<void>;
   readonly initialTheme?: ThemeState;
   readonly initialLanguage?: LanguageState;
   getInitial(): Promise<{ profiles: Profile[]; states: ServerState[]; version: string; theme?: ThemeState; language?: LanguageState; shutdown?: ShutdownNotice | null; pendingHostKeys?: HostKeyRequest[]; update?: UpdateState }>;
@@ -207,6 +213,7 @@ export interface LionApi {
   checkUpdate?(): Promise<UpdateState>;
   installUpdate?(): Promise<void>;
   openUpdateDownload?(): Promise<void>;
+  openWebLink?(url: string): Promise<void>;
   onUpdate?(callback: (state: UpdateState) => void): () => void;
   setTheme(preference: ThemePreference): Promise<ThemeState>;
   setLanguage?(preference: LanguagePreference): Promise<LanguageState>;

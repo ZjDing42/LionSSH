@@ -35,6 +35,12 @@ function createTauriApi(): LionApi {
     return invoke<T>('lion_request', { method, args });
   };
   return {
+    fileRequest: (action, args) => request('files', action, args),
+    fileDialog: kind => request('files-dialog', kind),
+    onFiles: callback => subscribe('lion:files', callback),
+    onFileDrop: callback => subscribe('lion:file-drop', callback),
+    dragFiles: sources => request('files-drag', sources),
+    setFileDropRegion: region => request('files-drop-region', region),
     getInitial: async () => {
       // Establish every event listener before the snapshot can start SSH work.
       await Promise.all([...subscriptions].map(ensureListening => ensureListening()));
@@ -44,6 +50,7 @@ function createTauriApi(): LionApi {
     checkUpdate: () => request('check-update'),
     installUpdate: () => request('install-update'),
     openUpdateDownload: () => request('open-update-download'),
+    openWebLink: url => request('open-web-link', url),
     onUpdate: callback => subscribe('lion:update', callback),
     setTheme: preference => request('set-theme', preference),
     setLanguage: preference => request('set-language', preference),

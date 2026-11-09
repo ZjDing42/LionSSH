@@ -922,24 +922,27 @@ fn valid_uid(uid: u64, root: bool) -> Result<(), String> {
     }
 }
 const UID_HEADER: &str = "uid=$(id -u) || exit 1\ncase \"$uid\" in ''|*[!0-9]*) exit 1 ;; esac";
+// Outside the shell exit-code range, so skipped roots cannot hide a failed scan.
+const SCAN_SKIPPED: u64 = 256;
 fn scan_row(label: &str, root: &str, follow_root: bool) -> String {
     let output = r#"-uid "$uid" -printf 'ENTRY\t%D\t%i\t%b\t%y\n'"#;
-    // Own files inside shared directories count. Other users' inaccessible
-    // directories are pruned; symlinks and mount points are never followed.
-    let predicate = if root == "/tmp" {
-        format!(
-            r#"\( -type d ! -uid "$uid" \( ! -readable -o ! -executable \) -prune \) -o \( {output} \)"#
-        )
-    } else {
-        output.into()
-    };
-    let header=format!("printf '{label}\\t'\n{{ find {} {} -xdev -mindepth 1 {predicate}; printf 'EXIT\\t%s\\n' \"$?\"; }}",if follow_root{"-H"}else{"-P"},quote(root));
+    // Skip every inaccessible directory, including ones owned by this user.
+    // Own entries in readable shared directories still count, without following links.
+    let predicate = format!(
+        r#"\( -type d \( ! -readable -o ! -executable \) -prune \) -o \( {output} \)"#
+    );
+    let root = quote(root);
+    let header=format!("if [ ! -r {root} ] || [ ! -x {root} ]; then\n  printf '{label}\\t0\\t0\\t0\\t{SCAN_SKIPPED}\\n'\nelse\nprintf '{label}\\t'\n{{ {{ LC_ALL=C find {} {root} -xdev -mindepth 1 {predicate}; printf 'EXIT\\t%s\\n' \"$?\"; }}",if follow_root{"-H"}else{"-P"});
+    // Inaccessible FUSE mounts can fail stat before find evaluates -prune.
+    // Classify stderr separately so filenames cannot become numeric records.
     format!(
         "{header}{}",
-        r#" | awk -F '\t' '
+        r#" 2>&1 1>&3 | LC_ALL=C awk '/^find: .*: (Permission denied|Operation not permitted)$/ { denied = 1; next } { other = 1 } END { printf "ACCESS\t%d\t%d\n", denied, other }'; } 3>&1 | awk -F '\t' '
 $1 == "ENTRY" { if (!seen[$2 ":" $3]++) bytes += $4 * 512; entries++; if ($5 == "f" || $5 == "l") candidates++ }
 $1 == "EXIT" { code = $2; finished = 1 }
-END { printf "%.0f\t%d\t%d\t%d\n", bytes, entries, candidates, finished ? code : 99 }'"#
+$1 == "ACCESS" { denied = $2; other = $3 }
+END { if (code == 1 && denied && !other) code = 0; if (other && code == 0) code = 1; printf "%.0f\t%d\t%d\t%d\n", bytes, entries, candidates, finished ? code : 99 }'
+fi"#
     )
 }
 fn build_storage_scan(username: &str) -> Result<String, String> {
@@ -1051,6 +1054,7 @@ fn scan_result(values: &[u64]) -> Result<(Option<u64>, u64, bool), String> {
     let files = values[2];
     let exit = values[3];
     match exit {
+        SCAN_SKIPPED if bytes == 0 && entries == 0 && files == 0 => return Ok((None, 0, false)),
         127 => return Err("服务器缺少 GNU find，无法统计个人空间".into()),
         126 => return Err("服务器不允许执行空间统计工具".into()),
         256.. => return Err("空间统计返回了无效退出码".into()),
@@ -1073,14 +1077,18 @@ fn parse_storage_scan(output: &str, username: &str) -> Result<Value, String> {
     let (uid, rows) = storage_rows(output, "LION_STORAGE_V1", &["HOME", "TMP"])?;
     let (home, _, home_partial) = scan_result(&rows[0])?;
     let (tmp, _, tmp_partial) = scan_result(&rows[1])?;
-    let total = match (home, tmp) {
-        (Some(a), Some(b)) => Some(
-            a.checked_add(b)
+    // Skipped roots show a dash and contribute zero. Other traversal failures
+    // retain the existing partial-result handling.
+    let tmp_partial = tmp_partial && tmp.is_some();
+    let total = home
+        .or_else(|| (rows[0][3] == SCAN_SKIPPED).then_some(0))
+        .map(|bytes| {
+            bytes
+                .checked_add(tmp.unwrap_or(0))
                 .filter(|v| *v <= SAFE_INTEGER)
-                .ok_or("空间占用合计超出范围")?,
-        ),
-        _ => None,
-    };
+                .ok_or("空间占用合计超出范围")
+        })
+        .transpose()?;
     let mut warnings = Vec::new();
     if home_partial {
         warnings.push("个人目录部分内容无法读取，统计可能不完整");
@@ -2211,6 +2219,43 @@ mod tests {
         assert_eq!(state["homePath"], "/home/tester");
         assert_eq!(state["totalBytes"], 12288);
         assert_eq!(state["partial"], false);
+        let missing = parse_storage_scan(
+            "LION_STORAGE_V1\t1001\nHOME\t4096\t2\t1\t0\nTMP\t0\t0\t0\t256\n",
+            "tester",
+        )
+        .unwrap();
+        assert!(missing["tmpBytes"].is_null());
+        assert_eq!(missing["totalBytes"], 4096);
+        assert_eq!(missing["partial"], false);
+        assert_eq!(missing["warnings"], json!([]));
+        for (tmp_row, expected_total) in [("8192\t3\t2\t0", 8192), ("0\t0\t0\t256", 0)] {
+            let skipped = parse_storage_scan(
+                &format!("LION_STORAGE_V1\t1001\nHOME\t0\t0\t0\t256\nTMP\t{tmp_row}\n"),
+                "tester",
+            )
+            .unwrap();
+            assert!(skipped["homeBytes"].is_null());
+            assert_eq!(skipped["totalBytes"], expected_total);
+            assert_eq!(skipped["partial"], false);
+            assert_eq!(skipped["warnings"], json!([]));
+        }
+        let unreadable = parse_storage_scan(
+            "LION_STORAGE_V1\t1001\nHOME\t4096\t2\t1\t0\nTMP\t0\t0\t0\t1\n",
+            "tester",
+        )
+        .unwrap();
+        assert!(unreadable["tmpBytes"].is_null());
+        assert_eq!(unreadable["totalBytes"], 4096);
+        assert_eq!(unreadable["partial"], false);
+        assert_eq!(unreadable["warnings"], json!([]));
+        let partial = parse_storage_scan(
+            "LION_STORAGE_V1\t1001\nHOME\t4096\t2\t1\t0\nTMP\t512\t1\t1\t1\n",
+            "tester",
+        )
+        .unwrap();
+        assert_eq!(partial["totalBytes"], 4608);
+        assert_eq!(partial["partial"], true);
+        assert_eq!(partial["warnings"].as_array().unwrap().len(), 1);
         let state = parse_storage_scan(
             "LION_STORAGE_V1\t1001\nHOME\t0\t0\t0\t1\nTMP\t8192\t3\t2\t0\n",
             "tester",
@@ -2223,6 +2268,8 @@ mod tests {
             "LION_STORAGE_V1\t1001\nHOME\t0\t0\t0\t127\nTMP\t0\t0\t0\t0\n",
             "LION_STORAGE_V1\t1001\nHOME\t0\t1\t2\t0\nTMP\t0\t0\t0\t0\n",
             "LION_STORAGE_V1\t1001\nHOME\t9007199254740992\t2\t1\t0\nTMP\t0\t0\t0\t0\n",
+            "LION_STORAGE_V1\t1001\nHOME\t512\t1\t1\t256\nTMP\t0\t0\t0\t0\n",
+            "LION_STORAGE_V1\t1001\nHOME\t4096\t2\t1\t0\nTMP\t512\t1\t1\t256\n",
         ] {
             assert!(parse_storage_scan(output, "tester").is_err());
         }
@@ -2389,6 +2436,69 @@ mod tests {
             state["partial"], false,
             "scan stdout: {scan_stdout:?}; scan stderr: {scan_stderr:?}"
         );
+        // A denied stat (e.g. /tmp/fuse) happens before -prune can run.
+        // Ignore only access failures; retain unrelated failures and never
+        // interpret error text, including newlines in filenames, as entries.
+        for (diagnostic, partial) in [
+            ("find: '/tmp/fuse': Permission denied", false),
+            ("find: '/tmp/fuse': Operation not permitted", false),
+            ("find: '/tmp/fuse': Permission denied\nfind: '/tmp/io': Input/output error", true),
+            ("find: '/tmp/fuse': Permission denied\nENTRY\t1\t2\t999999999\tf", true),
+            ("", true),
+        ] {
+            let script = format!(
+                "find() {{ printf '%s' {} >&2; command find \"$@\"; return 1; }}\n{}",
+                quote(diagnostic),
+                isolated(build_storage_scan("tester").unwrap())
+            );
+            let output = shell(bash, &script);
+            assert!(output.status.success());
+            assert!(output.stderr.is_empty());
+            let scanned = parse_storage_scan(&String::from_utf8(output.stdout).unwrap(), "tester")
+                .unwrap();
+            assert_eq!(scanned["homeBytes"], state["homeBytes"]);
+            assert_eq!(scanned["tmpBytes"], state["tmpBytes"]);
+            assert_eq!(scanned["totalBytes"], state["totalBytes"]);
+            assert_eq!(scanned["partial"], partial, "{diagnostic}");
+            assert_eq!(scanned["warnings"].as_array().unwrap().is_empty(), !partial);
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // An owned but unreadable directory must not add even its own blocks.
+            let blocked = [home.join("blocked"), tmp.join("blocked")];
+            for directory in &blocked {
+                std::fs::create_dir(directory).unwrap();
+                std::fs::write(directory.join("excluded"), vec![b'X'; 65536]).unwrap();
+                std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o000))
+                    .unwrap();
+            }
+            let skipped = shell(bash, &isolated(build_storage_scan("tester").unwrap()));
+            for directory in &blocked {
+                std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))
+                    .unwrap();
+                std::fs::remove_file(directory.join("excluded")).unwrap();
+                std::fs::remove_dir(directory).unwrap();
+            }
+            assert!(skipped.status.success());
+            assert!(skipped.stderr.is_empty());
+            assert_eq!(
+                parse_storage_scan(&String::from_utf8(skipped.stdout).unwrap(), "tester").unwrap(),
+                state
+            );
+        }
+        let missing = shell(
+            bash,
+            &isolated(build_storage_scan("tester").unwrap())
+                .replace(&shell_tmp, &format!("{shell_tmp}/absent")),
+        );
+        assert!(missing.status.success());
+        assert!(missing.stderr.is_empty());
+        let missing =
+            parse_storage_scan(&String::from_utf8(missing.stdout).unwrap(), "tester").unwrap();
+        assert!(missing["tmpBytes"].is_null());
+        assert_eq!(missing["totalBytes"], state["homeBytes"]);
+        assert_eq!(missing["warnings"], json!([]));
         let preview = shell(bash, &isolated(build_tmp_preview()));
         let preview = parse_tmp_preview(&String::from_utf8(preview.stdout).unwrap()).unwrap();
         assert_eq!(preview["fileCount"], 6); // Two hardlinks, two symlinks, and two ordinary files.

@@ -16,7 +16,8 @@
 | Port tunnels | Manage forward and reverse tunnels with multiple rules, failure detection, and automatic recovery. |
 | NVIDIA GPU monitoring | See GPU usage and idle counts, with scheduled checks, pause, and manual refresh. |
 | Slurm job management | View your jobs or all jobs, inspect status and queue reasons, query Priority, and cancel your own jobs after confirmation. |
-| Personal storage | Check personal directory and owned `/tmp` usage; preview and confirm cleanup of your own temporary files. |
+| SFTP file manager | Browse remote directories, edit text, preview images, transfer files and folders, and copy between servers. |
+| Personal storage | Count your files in accessible directories, skipping permission-denied paths; preview and confirm cleanup of your own temporary files. |
 | Chinese and English | Chinese system locales default to Chinese; all other locales default to English. Manually choose 中文, English, or System, with your preference saved. |
 | Themes and system tray | Choose light, dark, or system appearance. Closing the window keeps connections and monitoring running in the tray. |
 | Logs and credentials | Review connection and tunnel logs. Remembered passwords and key passphrases are protected by system secure storage. |
@@ -45,10 +46,26 @@ Open remote terminals inside the app for everyday commands, with colored output,
 - Double-click a tab to edit its note. Each server keeps its own tabs.
 - Sessions stay open when you switch pages or servers or hide the app to the tray, and close when you quit. After an SSH disconnect, reconnect and open a new terminal.
 - Right-click selected text to copy; right-click without a selection to paste. `Ctrl+Shift+C` / `Ctrl+Shift+V` also work.
+- Click recognized HTTP/HTTPS links to open them in your system's default browser.
+
+### File manager
+
+Open **Tools → File manager** on a device to browse over SFTP using its existing SSH connection.
+
+- The remote path field offers directory suggestions, Enter to navigate and Tab to complete. Click a folder to expand/collapse it; use the right-arrow button on its selected row to enter it. Double-clicking does not change the current directory. The tree supports multiple selection, inline creation/renaming, icon tooltips and context menus.
+- Open multiple text/image tabs. Text editing includes syntax highlighting, undo/redo, cut/copy/paste, Ctrl/Cmd+S, and search/replace with localized labels and light/dark themes. LF, CRLF and CR line endings, including mixed training logs, display correctly and retain their original separators when editing or undoing. Closing dirty tabs prompts to save; externally changed remote files cannot be silently overwritten.
+- Preview PNG, JPEG, GIF, WebP, BMP, ICO and SVG. Use Ctrl + mouse wheel to zoom, or the zoom buttons to adjust/reset the image size.
+- The upload icon offers files or folders; the download button selects a local directory. Only the file tree accepts external drops, highlighting the destination folder. Drag out to download. Copy/paste works within and between servers.
+- Drag within the tree to move after confirming source and destination paths. Delete via the toolbar, context menu or Delete key after confirmation. Clicking tree whitespace clears selection and commits an inline name; an empty name cancels creation.
+- The transfer panel shows bytes, progress, speed, elapsed time and ETA; speed and ETA refresh once per second. Right-click to pause, resume, cancel, retry or resolve name conflicts. Interrupted transfers resume after reconnecting within the current app session; the panel hides when all transfers finish.
+
+Text editing supports UTF-8 and BOM-marked UTF-16 up to 5 MiB; image previews support up to 20 MiB. Larger files can still be transferred. Native drag-out uses Windows virtual files, macOS file promises and Linux URI drops. Windows/Linux drag-out requires local temporary space and shows “Drop destination folder” in the queue. Use the download button for symbolic links or paths exceeding Windows virtual-file descriptor limits.
+
+Tool panels use the available window width with fixed side margins. Personal storage skips directories you cannot read, including inaccessible FUSE mounts. If `/tmp` is missing or inaccessible, its value is shown as `—`, it contributes zero to the total, and cleanup is disabled; other scan errors still report a warning.
 
 ## Download
 
-**[Download from Releases](https://github.com/ZjDing989/LionSSH/releases)**
+**[Download the latest release](https://github.com/ZjDing42/LionSSH/releases/latest)** · [v1.10.1 release notes](.github/release-notes/v1.10.1.md)
 
 | Platform | Package |
 | --- | --- |
