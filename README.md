@@ -53,6 +53,7 @@ Open remote terminals inside the app for everyday commands, with colored output,
 Open **Tools → File manager** on a device to browse over SFTP using its existing SSH connection.
 
 - The remote path field offers directory suggestions, Enter to navigate and Tab to complete. Click a folder to expand/collapse it; use the right-arrow button on its selected row to enter it. Double-clicking does not change the current directory. The tree supports multiple selection, inline creation/renaming, icon tooltips and context menus.
+- Material Icon Theme icons distinguish common file types in the tree and open tabs. Folder icons reflect expanded/collapsed states, and icons update as you create or rename files. Only the required SVGs are bundled for offline use.
 - Open multiple text/image tabs. Text editing includes syntax highlighting, undo/redo, cut/copy/paste, Ctrl/Cmd+S, and search/replace with localized labels and light/dark themes. LF, CRLF and CR line endings, including mixed training logs, display correctly and retain their original separators when editing or undoing. Closing dirty tabs prompts to save; externally changed remote files cannot be silently overwritten.
 - Preview PNG, JPEG, GIF, WebP, BMP, ICO and SVG. Use Ctrl + mouse wheel to zoom, or the zoom buttons to adjust/reset the image size.
 - The upload icon offers files or folders; the download button selects a local directory. Only the file tree accepts external drops, highlighting the destination folder. Drag out to download. Copy/paste works within and between servers.
@@ -65,7 +66,7 @@ Tool panels use the available window width with fixed side margins. Personal sto
 
 ## Download
 
-**[Download the latest release](https://github.com/ZjDing42/LionSSH/releases/latest)** · [v1.10.3 release notes](.github/release-notes/v1.10.3.md)
+**[Download the latest release](https://github.com/ZjDing42/LionSSH/releases/latest)** · [v1.10.4 release notes](.github/release-notes/v1.10.4.md)
 
 | Platform | Package |
 | --- | --- |
