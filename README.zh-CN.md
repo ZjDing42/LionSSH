@@ -65,7 +65,7 @@
 
 ## 下载
 
-**[下载最新版本](https://github.com/ZjDing42/LionSSH/releases/latest)** · [v1.10.2 更新日志](.github/release-notes/v1.10.2.md)
+**[下载最新版本](https://github.com/ZjDing42/LionSSH/releases/latest)** · [v1.10.3 更新日志](.github/release-notes/v1.10.3.md)
 
 | 平台 | 发行格式 |
 | --- | --- |

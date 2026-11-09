@@ -88,6 +88,24 @@ async function load(path: string, navigate = false, id = props.profileId) {
     if (navigation === current.navigation) throw error;
   } finally { current.loading = current.loading.filter(p => p !== path); }
 }
+async function refreshTree(path = group.value.path, id = props.profileId) {
+  if (!path || props.states[id]?.status !== 'connected' || props.disabled) return;
+  const current = getGroup(id), navigation = current.navigation, visited = new Set<string>(), errors: unknown[] = [];
+  async function refresh(path: string, depth: number) {
+    if (depth > 80 || visited.has(path) || navigation !== current.navigation) return;
+    visited.add(path);
+    try { await load(path, false, id); }
+    catch (error) { errors.push(error); return; }
+    // Follow the fresh parent listing so deleted directories are not queried.
+    // Closed branches are fetched when expanded, keeping refresh proportional
+    // to the open tree rather than scanning the entire remote filesystem.
+    for (const entry of current.tree[path] || []) {
+      if (entry.directory && current.expanded.includes(entry.path)) await refresh(entry.path, depth + 1);
+    }
+  }
+  await refresh(path, 0);
+  if (navigation === current.navigation && errors.length) throw errors[0];
+}
 async function initialize() {
   if (!props.visible || !props.profileId || !connected.value || group.value.initialized) return;
   const id = props.profileId, current = group.value;
@@ -139,7 +157,7 @@ async function toggle(entry: FileEntry) {
   const current = group.value;
   if (current.expanded.includes(entry.path)) { current.expanded = current.expanded.filter(p => p !== entry.path); return; }
   current.expanded.push(entry.path);
-  if (!current.tree[entry.path]) await guarded(() => load(entry.path), current);
+  await guarded(() => refreshTree(entry.path), current);
 }
 async function open(entry: FileEntry, id = props.profileId) {
   const current = getGroup(id);
@@ -287,7 +305,7 @@ function treeKey(event: KeyboardEvent) {
     if (key === 'c') copied(); else if (key === 'v') void paste(); else group.value.selected = rows.value.map(r => r.entry.path);
   } else if (event.key === 'F2') { event.preventDefault(); void startName(false, true); }
   else if (event.key === 'Delete' && connected.value) { event.preventDefault(); promptDelete(); }
-  else if (event.key === 'F5') { event.preventDefault(); void guarded(() => load(group.value.path)); }
+  else if (event.key === 'F5') { event.preventDefault(); void guarded(() => refreshTree()); }
   else if (event.key === 'Escape') { editing.value = null; dismissMenu(); cancelDrag(); }
 }
 function targetAt(x: number, y: number): string | null {
@@ -454,7 +472,7 @@ onBeforeUnmount(() => { clearTimeout(completionTimer); completionGeneration++; u
           <div v-if="!rows.length && !editing" class="files-tree-empty">{{ t(group.loading.length ? '正在读取目录…' : group.initialized ? '此文件夹为空' : '等待连接') }}</div>
           <div v-if="dropTarget" class="files-drop-label">{{ t(moving ? '松开以移动到' : '松开以上传到') }} {{ dropTarget }}</div>
         </div>
-        <div class="files-tree-footer"><span>{{ rows.length }} {{ t('个项目') }}</span><button class="icon-button" :title="t('刷新')" :disabled="!connected || !group.path" @click="guarded(() => load(group.path))"><Icon name="refresh" :size="14" /></button></div>
+        <div class="files-tree-footer"><span>{{ rows.length }} {{ t('个项目') }}</span><button class="icon-button" :title="t('刷新')" :disabled="!connected || !group.path" @click="guarded(() => refreshTree())"><Icon name="refresh" :size="14" /></button></div>
       </aside>
       <div class="files-divider" role="separator" aria-orientation="vertical" :aria-label="t('调整文件树宽度')" @pointerdown="resize" />
       <main class="files-content">
@@ -468,7 +486,7 @@ onBeforeUnmount(() => { clearTimeout(completionTimer); completionGeneration++; u
     <Teleport to="body">
       <div v-if="menu" class="files-context" role="menu" :style="{ left: `${menu.x}px`, top: `${menu.y}px` }" @pointerdown.stop>
         <button v-for="[icon, label] in tools" :key="icon" role="menuitem" :disabled="toolDisabled(icon!)" @click="action(icon!, $event); menu = null"><Icon :name="icon!" :size="15" />{{ t(label!) }}</button>
-        <button role="menuitem" :disabled="!connected" @click="upload(true)"><Icon name="folder" :size="15" />{{ t('上传文件夹…') }}</button><hr /><button role="menuitemcheckbox" :aria-checked="showHidden" @click="showHidden = !showHidden; menu = null"><Icon name="eye" :size="15" />{{ t(showHidden ? '隐藏隐藏文件' : '显示隐藏文件') }}</button><button role="menuitem" :disabled="!connected" @click="guarded(() => load(group.path)); menu = null"><Icon name="refresh" :size="15" />{{ t('刷新') }}<kbd>F5</kbd></button>
+        <button role="menuitem" :disabled="!connected" @click="upload(true)"><Icon name="folder" :size="15" />{{ t('上传文件夹…') }}</button><hr /><button role="menuitemcheckbox" :aria-checked="showHidden" @click="showHidden = !showHidden; menu = null"><Icon name="eye" :size="15" />{{ t(showHidden ? '隐藏隐藏文件' : '显示隐藏文件') }}</button><button role="menuitem" :disabled="!connected" @click="guarded(() => refreshTree()); menu = null"><Icon name="refresh" :size="15" />{{ t('刷新') }}<kbd>F5</kbd></button>
       </div>
       <div v-if="uploadMenu" class="files-context" role="menu" :aria-label="t('上传')" :style="{ left: `${uploadMenu.x}px`, top: `${uploadMenu.y}px` }" @pointerdown.stop>
         <button role="menuitem" @click="upload(false)"><Icon name="file" :size="15" />{{ t('上传文件…') }}</button>
