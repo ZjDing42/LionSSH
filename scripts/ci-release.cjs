@@ -92,8 +92,8 @@ async function makeUpdaterJson({ version, tag, repository, assets, readSignature
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) throw new Error('Invalid GitHub repository');
   const server = new URL(serverUrl);
   if (server.protocol !== 'https:') throw new Error('Updater downloads require HTTPS');
-  // Existing installations only allow the original repository path. GitHub
-  // redirects it after the rename, so keep that path in the signed update feed.
+  // Older clients only allow the original repository path. Keep this feed
+  // compatible; v1.10.2+ rewrites downloads to the current owner before I/O.
   const downloadRepository = server.origin === 'https://github.com' && repository === 'ZjDing42/LionSSH'
     ? 'ZjDing989/LionSSH' : repository;
   if (!Number.isFinite(Date.parse(publishedAt))) throw new Error('Invalid publication timestamp');

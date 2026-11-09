@@ -194,12 +194,12 @@ impl UpdateManager {
                 builder = builder.installer_arg(directory_argument);
             }
             let updater = builder.build().map_err(error_text)?;
-            let update = tokio::select! {
+            let mut update = tokio::select! {
                 _ = self.cancel.cancelled()=>return Err("更新检查已取消".to_owned()),
                 update = updater.check()=>update.map_err(error_text)?,
             };
-            if let Some(update) = &update {
-                validate_release_url(update.download_url.as_str())?;
+            if let Some(update) = &mut update {
+                update.download_url = release_download_url(update.download_url.as_str())?;
             }
             Ok::<_, String>(update)
         }
@@ -255,7 +255,7 @@ impl UpdateManager {
         if version(&update.version)? <= version(env!("CARGO_PKG_VERSION"))? {
             return Err("更新版本必须高于当前版本".into());
         }
-        validate_release_url(update.download_url.as_str())?;
+        update.download_url = release_download_url(update.download_url.as_str())?;
         update.timeout = Some(Duration::from_secs(180));
         self.patch(json!({"status":"downloading","downloaded":0,"total":null,"error":null}));
         let mut downloaded = 0u64;
@@ -360,17 +360,19 @@ impl Drop for PreparedUpdate {
     }
 }
 
-fn validate_release_url(value: &str) -> Result<(), String> {
-    if ![
-        "https://github.com/ZjDing42/LionSSH/releases/download/",
+fn release_download_url(value: &str) -> Result<tauri::Url, String> {
+    const CURRENT: &str = "https://github.com/ZjDing42/LionSSH/releases/download/";
+    let url = tauri::Url::parse(value).map_err(error_text)?;
+    let suffix = [
+        CURRENT,
         "https://github.com/ZjDing989/LionSSH/releases/download/",
     ]
     .iter()
-    .any(|prefix| value.starts_with(prefix))
-    {
-        return Err("更新包地址不属于 LionSSH 官方 GitHub Release".into());
-    }
-    Ok(())
+    .find_map(|prefix| url.as_str().strip_prefix(prefix))
+    .ok_or("更新包地址不属于 LionSSH 官方 GitHub Release")?;
+    // The shared feed keeps legacy URLs for older clients. Rewrite them before
+    // any download so this client no longer depends on the old owner's redirect.
+    format!("{CURRENT}{suffix}").parse().map_err(error_text)
 }
 
 fn decode_base64(value: &str) -> Result<String, String> {
@@ -1132,23 +1134,36 @@ mod tests {
     }
 
     #[test]
-    fn validates_release_source_and_semver() {
-        assert!(validate_release_url(
-            "https://github.com/ZjDing989/LionSSH/releases/download/v1.10.1/update.zip"
-        )
-        .is_ok());
-        assert!(validate_release_url(
-            "https://github.com/someone/LionSSH/releases/download/v1.10.1/update.zip"
-        )
-        .is_err());
-        assert!(validate_release_url(
-            "https://github.com/ZjDing42/LionSSH/releases/download/v1.7.0/update.zip"
-        )
-        .is_ok());
-        assert!(validate_release_url(
-            "https://github.com.example.com/ZjDing989/LionSSH/releases/download/x"
-        )
-        .is_err());
+    fn release_downloads_use_current_owner_for_every_platform() {
+        for file in [
+            "Lion-SSH-1.10.2-windows-x64-setup.exe",
+            "Lion-SSH-1.10.2-windows-x64-portable.zip",
+            "Lion-SSH-1.10.2-macos-aarch64.app.tar.gz",
+            "Lion-SSH-1.10.2-macos-x86_64.app.tar.gz",
+            "Lion-SSH-1.10.2-linux-x86_64.AppImage",
+        ] {
+            let suffix = format!("v1.10.2/{file}?download=1");
+            let expected = format!("https://github.com/ZjDing42/LionSSH/releases/download/{suffix}");
+            for owner in ["ZjDing989", "ZjDing42"] {
+                let input = format!("https://github.com/{owner}/LionSSH/releases/download/{suffix}");
+                let actual = release_download_url(&input).unwrap();
+                assert_eq!(actual.as_str(), expected);
+                assert_eq!(release_download_url(actual.as_str()).unwrap(), actual);
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_unofficial_release_sources_and_compares_semver() {
+        for input in [
+            "https://github.com/someone/LionSSH/releases/download/v1.10.2/update.zip",
+            "https://github.com.example.com/ZjDing989/LionSSH/releases/download/x",
+            "https://github.com@evil.example/ZjDing989/LionSSH/releases/download/x",
+            "http://github.com/ZjDing989/LionSSH/releases/download/x",
+            "https://github.com/ZjDing989/LionSSH/releases/download/../other/x",
+        ] {
+            assert!(release_download_url(input).is_err(), "{input}");
+        }
         assert_eq!(version("v1.7.0").unwrap(), version("1.7.0").unwrap());
     }
 
