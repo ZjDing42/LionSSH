@@ -26,6 +26,8 @@ const root = path.resolve(__dirname, '..');
   let browser, events;
   try {
     await backend.invoke('initial');
+    // The real backend resolves system language independently of Chromium's locale.
+    await backend.invoke('set-language', 'zh');
     for (const id of ['alpha', 'beta']) {
       await backend.invoke('save-profile', profile(ssh, { id, name: id === 'alpha' ? '研究服务器' : '计算服务器' }));
       const cursor = backend.messages.length; await backend.invoke('connect', id, { password: 'test-password' }); if (id === 'alpha') await backend.trust(id, true, cursor);
