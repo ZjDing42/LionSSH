@@ -90,8 +90,15 @@ function generate(options = {}) {
       file, relativePath: path.relative(packageRoot, file).split(path.sep).join('/'),
     }));
     for (const supplement of supplemental) {
-      const vcs = JSON.parse(readText(path.join(packageRoot, '.cargo_vcs_info.json')));
-      if (vcs.git.sha1 !== supplement.commit) throw new Error(`Supplemental license commit mismatch: ${pkg.name} ${pkg.version}`);
+      const vcsPath = path.join(packageRoot, '.cargo_vcs_info.json');
+      if (fs.existsSync(vcsPath)) {
+        const vcs = JSON.parse(readText(vcsPath));
+        if (vcs.git.sha1 !== supplement.commit) throw new Error(`Supplemental license commit mismatch: ${pkg.name} ${pkg.version}`);
+      } else if (!supplement.packageManifestSha256 || digest(fs.readFileSync(pkg.manifest_path)) !== supplement.packageManifestSha256) {
+        // Older Cargo archives predate VCS metadata. Pin their published
+        // manifest as well as the upstream version-tag commit instead.
+        throw new Error(`Supplemental license package manifest mismatch: ${pkg.name} ${pkg.version}`);
+      }
       for (const source of supplement.files) {
         const file = path.resolve(sourceDirectory, source.path);
         if (!file.startsWith(`${sourceDirectory}${path.sep}`)) throw new Error(`Invalid supplemental license path: ${source.path}`);
