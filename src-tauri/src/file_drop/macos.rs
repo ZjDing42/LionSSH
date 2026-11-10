@@ -1,6 +1,6 @@
 use super::{emit, emit_remote, DropState};
 use objc2::{
-    runtime::{AnyObject, Bool, ClassBuilder, ProtocolObject, Sel},
+    runtime::{AnyClass, AnyObject, Bool, Imp, ProtocolObject, Sel},
     sel, ClassType,
 };
 use objc2_app_kit::{
@@ -12,8 +12,9 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
-// The app has one webview. The subclass adds no ivars and preserves Wry's
-// layout/deallocation; only NSDraggingDestination callbacks are replaced.
+// The app has one webview; only its NSDraggingDestination callbacks change.
+// Preserve its runtime class: changing isa after NSView initialization breaks
+// AppKit's computed-property registrations and aborts on Apple Silicon.
 static OWNER: OnceLock<(tauri::WebviewWindow, Arc<DropState>)> = OnceLock::new();
 fn remote_sources(
     state: &DropState,
@@ -115,25 +116,45 @@ pub fn install(window: &tauri::WebviewWindow, state: Arc<DropState>) -> Result<(
     window
         .with_webview(move |native| unsafe {
             let object = &*(native.inner() as *const AnyObject);
-            let mut class = ClassBuilder::new(c"LionFileDropWebView", object.class())
-                .expect("unique file drop class");
-            class.add_method(
-                sel!(draggingEntered:),
-                motion as extern "C-unwind" fn(_, _, _) -> _,
-            );
-            class.add_method(
-                sel!(draggingUpdated:),
-                motion as extern "C-unwind" fn(_, _, _) -> _,
-            );
-            class.add_method(
-                sel!(performDragOperation:),
-                drop as extern "C-unwind" fn(_, _, _) -> _,
-            );
-            class.add_method(
-                sel!(draggingExited:),
-                leave as extern "C-unwind" fn(_, _, _),
-            );
-            AnyObject::set_class(object, class.register());
+            let class = object.class();
+            type Motion = extern "C-unwind" fn(
+                &AnyObject,
+                Sel,
+                &ProtocolObject<dyn NSDraggingInfo>,
+            ) -> NSDragOperation;
+            type Drop =
+                extern "C-unwind" fn(&AnyObject, Sel, &ProtocolObject<dyn NSDraggingInfo>) -> Bool;
+            type Leave = extern "C-unwind" fn(&AnyObject, Sel, &ProtocolObject<dyn NSDraggingInfo>);
+            // Wry implements all four methods. Replace them on the concrete
+            // class without changing its superclass, ivars or NSView state.
+            for (selector, implementation) in [
+                (
+                    sel!(draggingEntered:),
+                    std::mem::transmute::<Motion, Imp>(motion),
+                ),
+                (
+                    sel!(draggingUpdated:),
+                    std::mem::transmute::<Motion, Imp>(motion),
+                ),
+                (
+                    sel!(performDragOperation:),
+                    std::mem::transmute::<Drop, Imp>(drop),
+                ),
+                (
+                    sel!(draggingExited:),
+                    std::mem::transmute::<Leave, Imp>(leave),
+                ),
+            ] {
+                let method = class
+                    .instance_method(selector)
+                    .expect("Wry drag destination method");
+                objc2::ffi::class_replaceMethod(
+                    class as *const AnyClass as *mut AnyClass,
+                    selector,
+                    implementation,
+                    objc2::ffi::method_getTypeEncoding(method),
+                );
+            }
             let view = &*(native.inner() as *const NSView);
             let promises = NSFilePromiseReceiver::readableDraggedTypes();
             let types: Vec<_> = promises.iter().collect();

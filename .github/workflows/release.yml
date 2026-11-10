@@ -68,7 +68,7 @@ jobs:
             bundles: app,dmg
             asset_platform: macos
             asset_arch: aarch64
-          - runner: macos-latest
+          - runner: macos-15-intel
             target: x86_64-apple-darwin
             bundles: app,dmg
             asset_platform: macos
@@ -147,13 +147,14 @@ jobs:
           tauriScript: npm run tauri
           args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --ci -- --locked
           releaseAssetNamePattern: Lion-SSH-[version]-${{ matrix.asset_platform }}-${{ matrix.asset_arch }}[setup][ext]
-      - name: Verify macOS app signatures in the DMG and updater archive
+      - name: Verify macOS signatures and packaged app startup
         if: runner.os == 'macOS'
         env:
           MACOS_ARTIFACT_PATHS: ${{ steps.native-build.outputs.artifactPaths }}
         run: |
           node --test tests/macos-signing.test.cjs
           node scripts/verify-macos-bundles.cjs '${{ matrix.target }}'
+          node scripts/macos-startup-smoke.cjs
       - name: Create and sign the Windows multi-file portable ZIP
         if: runner.os == 'Windows'
         env:
