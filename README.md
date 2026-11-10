@@ -66,7 +66,7 @@ Tool panels use the available window width with fixed side margins. Personal sto
 
 ## Download
 
-**[Download the latest release](https://github.com/ZjDing42/LionSSH/releases/latest)** · [v1.10.5 release notes](.github/release-notes/v1.10.5.md)
+**[Download the latest release](https://github.com/ZjDing42/LionSSH/releases/latest)** · [v1.10.6 release notes](.github/release-notes/v1.10.6.md)
 
 | Platform | Package |
 | --- | --- |
