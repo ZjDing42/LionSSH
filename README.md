@@ -66,7 +66,7 @@ Tool panels use the available window width with fixed side margins. Personal sto
 
 ## Download
 
-**[Download the latest release](https://github.com/ZjDing42/LionSSH/releases/latest)** · [v1.10.4 release notes](.github/release-notes/v1.10.4.md)
+**[Download the latest release](https://github.com/ZjDing42/LionSSH/releases/latest)** · [v1.10.5 release notes](.github/release-notes/v1.10.5.md)
 
 | Platform | Package |
 | --- | --- |
@@ -76,6 +76,8 @@ Tool panels use the available window width with fixed side margins. Personal sto
 | Linux x86_64 | AppImage |
 
 Windows requires [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/); the installer downloads it if missing. The default installation directory is `%LOCALAPPDATA%\Programs\Lion SSH`, and you can choose another location.
+
+macOS packages use a full ad-hoc application signature, verified in CI for both the DMG and updater archive. They are not Developer ID signed or notarized by Apple. After copying the app to Applications, you may need to allow it in **System Settings → Privacy & Security → Open Anyway** if you trust the download. See [Apple's instructions](https://support.apple.com/en-us/102445).
 
 ## Data
 

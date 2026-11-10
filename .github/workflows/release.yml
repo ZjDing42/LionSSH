@@ -129,6 +129,7 @@ jobs:
         if: runner.os != 'Windows'
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked
       - name: Build and upload signed native bundles
+        id: native-build
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -146,6 +147,13 @@ jobs:
           tauriScript: npm run tauri
           args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --ci -- --locked
           releaseAssetNamePattern: Lion-SSH-[version]-${{ matrix.asset_platform }}-${{ matrix.asset_arch }}[setup][ext]
+      - name: Verify macOS app signatures in the DMG and updater archive
+        if: runner.os == 'macOS'
+        env:
+          MACOS_ARTIFACT_PATHS: ${{ steps.native-build.outputs.artifactPaths }}
+        run: |
+          node --test tests/macos-signing.test.cjs
+          node scripts/verify-macos-bundles.cjs '${{ matrix.target }}'
       - name: Create and sign the Windows multi-file portable ZIP
         if: runner.os == 'Windows'
         env:

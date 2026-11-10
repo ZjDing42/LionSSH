@@ -66,7 +66,7 @@
 
 ## 下载
 
-**[下载最新版本](https://github.com/ZjDing42/LionSSH/releases/latest)** · [v1.10.4 更新日志](.github/release-notes/v1.10.4.md)
+**[下载最新版本](https://github.com/ZjDing42/LionSSH/releases/latest)** · [v1.10.5 更新日志](.github/release-notes/v1.10.5.md)
 
 | 平台 | 发行格式 |
 | --- | --- |
@@ -76,6 +76,8 @@
 | Linux x86_64 | AppImage |
 
 Windows 需要 [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)，安装包会在缺少时下载；默认安装到 `%LOCALAPPDATA%\Programs\Lion SSH`，可手动更改。
+
+macOS 发行包使用完整应用包临时签名，CI 会检查 DMG 和更新归档中的签名；目前尚未使用 Developer ID 签名或通过 Apple 公证。复制到“应用程序”后，若系统拦截且你信任下载来源，可能需要在 **系统设置 → 隐私与安全性 → 仍要打开** 中允许运行，详见 [Apple 操作说明](https://support.apple.com/zh-cn/102445)。
 
 ## 数据
 
