@@ -138,7 +138,7 @@ pub fn normalize_profile(input: &Value) -> Result<Value, String> {
             }
         }
     }
-    Ok(json!({
+    let mut profile = json!({
         "id": text(&fallback(&input["id"], &uuid::Uuid::new_v4().to_string()), 100, "设备标识", true)?,
         "name": text(&input["name"], 80, "设备名称", true)?,
         "host": text(&input["host"], 253, "服务器地址", true)?,
@@ -149,7 +149,73 @@ pub fn normalize_profile(input: &Value) -> Result<Value, String> {
         "autoReconnect": input["autoReconnect"] != false,
         "gpu": gpu_settings(&input["gpu"])?,
         "tunnels": tunnels
-    }))
+    });
+    if let Some(value) = input.get("jumpHosts").filter(|v| !v.is_null()) {
+        let values = value.as_array().ok_or("跳板机配置格式不正确")?;
+        let mut ids = HashSet::new();
+        let mut hops = Vec::new();
+        for (index, value) in values.iter().enumerate() {
+            if !value.is_object() {
+                return Err("跳板机配置格式不正确".into());
+            }
+            let mut hop = value.clone();
+            hop["jumpHosts"] = Value::Null;
+            hop["tunnels"] = json!([]);
+            hop["gpu"] = json!({});
+            if hop["name"].as_str().unwrap_or("").trim().is_empty() {
+                hop["name"] = json!(format!("跳板机 {}", index + 1));
+            }
+            let mut hop = normalize_profile(&hop)
+                .map_err(|error| format!("跳板机 {}：{error}", index + 1))?;
+            if !ids.insert(hop["id"].as_str().unwrap().to_owned()) {
+                return Err("跳板机标识重复".into());
+            }
+            for key in ["gpu", "tunnels", "autoReconnect"] {
+                hop.as_object_mut().unwrap().remove(key);
+            }
+            hops.push(hop);
+        }
+        profile["jumpHosts"] = json!(hops);
+    }
+    Ok(profile)
+}
+
+pub fn jump_hosts(profile: &Value) -> &[Value] {
+    profile["jumpHosts"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+}
+
+pub fn connection_endpoints(profile: &Value) -> Vec<&Value> {
+    jump_hosts(profile)
+        .iter()
+        .chain(std::iter::once(profile))
+        .collect()
+}
+
+pub fn same_login(left: &Value, right: &Value) -> bool {
+    ["host", "port", "username", "authType", "keyPath"]
+        .iter()
+        .all(|key| left[key] == right[key])
+}
+
+pub fn endpoint_label(profile: &Value, index: usize) -> String {
+    let hops = jump_hosts(profile);
+    if let Some(hop) = hops.get(index) {
+        format!(
+            "跳板机 {}（{}:{}）",
+            index + 1,
+            hop["host"].as_str().unwrap_or(""),
+            hop["port"]
+        )
+    } else {
+        format!(
+            "目标服务器（{}:{}）",
+            profile["host"].as_str().unwrap_or(""),
+            profile["port"]
+        )
+    }
 }
 
 pub fn blank_state(profile: &Value) -> Value {

@@ -40,6 +40,59 @@ function sameGeometry(actual, expected, label) {
 }
 const waitOpen = page => page.locator('.gpu-process-overlay[data-motion="open"]').waitFor();
 const waitClosed = page => page.locator('.gpu-process-overlay').waitFor({ state: 'detached' });
+const openTrigger = '.gpu-detail .gpu-detail-open';
+const closeTriggers = {
+  button: '.gpu-process-panel button[aria-label="关闭"]',
+  backdrop: '.gpu-process-backdrop',
+};
+
+async function captureMorph(page, trigger, opening) {
+  await page.evaluate(({ trigger, opening }) => {
+    const frames = window.__motionFrames = [];
+    const origin = document.querySelector('.gpu-detail');
+    const capture = () => {
+      const overlay = document.querySelector('.gpu-process-overlay');
+      if (window.__motionFrames !== frames || !overlay || (opening && overlay.dataset.motion === 'open')) return;
+      const shell = overlay.querySelector('.gpu-process-morph');
+      if (shell) {
+        const [card, detail] = shell.children;
+        const cardWidth = origin.getBoundingClientRect().width;
+        const panelWidth = overlay.querySelector('.gpu-process-panel:not(.gpu-motion-layer)').getBoundingClientRect().width;
+        frames.push({
+          position: (shell.getBoundingClientRect().width - cardWidth) / (panelWidth - cardWidth),
+          blur: parseFloat(getComputedStyle(shell).filter.slice(5)),
+          cardOpacity: Number(card.style.opacity),
+          detailOpacity: Number(detail.style.opacity),
+          scroll: detail.querySelector('.gpu-process-table-wrap').scrollTop,
+          text: getComputedStyle(detail.querySelector('td')).color,
+          particles: Boolean(overlay.querySelector('.gpu-process-particles')),
+        });
+      }
+      requestAnimationFrame(capture);
+    };
+    document.querySelector(trigger).click();
+    requestAnimationFrame(capture);
+  }, { trigger, opening });
+  await (opening ? waitOpen(page) : waitClosed(page));
+  return page.evaluate(() => window.__motionFrames);
+}
+
+function checkMorph(frames, opening, color) {
+  const direction = opening ? 1 : -1;
+  assert(frames.some(frame => frame.blur > 2), 'content blurs during the morph');
+  assert(frames.every(frame => frame.cardOpacity + frame.detailOpacity > .99), 'no empty frame during the morph');
+  assert(frames.every(frame => frame.text === color && !frame.particles), 'the morph uses the themed snapshots without particles');
+  for (let i = 1; i < frames.length; i++) {
+    const previous = frames[i - 1].position, current = frames[i].position;
+    assert(direction * (current - previous) >= -.002, `the shell resizes continuously during ${opening ? 'opening' : 'closing'} (${previous} → ${current})`);
+  }
+  const next = frames.findIndex(frame => direction * (frame.detailOpacity - .5) >= 0);
+  assert(next > 0, 'the recording captures both sides of the card/table handoff');
+  const [a, b] = frames.slice(next - 1, next + 1);
+  const fraction = (.5 - a.detailOpacity) / (b.detailOpacity - a.detailOpacity);
+  return a.position + (b.position - a.position) * fraction;
+}
+
 async function contrast(page) {
   return page.locator('.gpu-process-table td').first().evaluate(td => {
     const rgb = color => color.match(/[\d.]+/g).slice(0, 3).map(Number);
@@ -82,55 +135,24 @@ async function contrast(page) {
       for (const fallback of [false, true]) {
         await page.evaluate(fallback => { document.documentElement.style.scrollbarGutter = fallback ? 'auto' : ''; window.scrollTo(0, 80); }, fallback);
         const before = await geometry(page);
-        await firstCard.locator('.gpu-detail-open').click(); await waitOpen(page);
-        sameGeometry(await geometry(page), before, `open/${theme}/${fallback}`);
-        const color = await contrast(page); assert.equal(color.foreground, color.expected); assert(color.ratio >= 4.5);
-        await page.locator('.gpu-process-panel').screenshot({ path: path.join(output, `panel-${theme}.png`) });
-        await page.locator('.gpu-process-table-wrap').evaluate(el => { el.scrollTop = 170; });
-        await page.evaluate(() => {
-          window.__motionFrames = [];
-          document.querySelector('.gpu-process-panel button[aria-label="关闭"]').click();
-          const capture = () => {
-            if (!document.querySelector('.gpu-process-overlay')) return;
-            const shell = document.querySelector('.gpu-process-morph');
-            if (shell) {
-              const layers = [...shell.children];
-              window.__motionFrames.push({ width: shell.getBoundingClientRect().width, blur: getComputedStyle(shell).filter, cardOpacity: Number(layers[0].style.opacity), detailOpacity: Number(layers[1].style.opacity), scroll: layers[1].querySelector('.gpu-process-table-wrap').scrollTop, text: getComputedStyle(layers[1].querySelector('td')).color });
-            }
-            requestAnimationFrame(capture);
-          };
-          requestAnimationFrame(capture);
-        });
-        await waitClosed(page);
-        const frames = await page.evaluate(() => window.__motionFrames);
-        assert(frames.length > 1, 'Gaussian return ran');
-        assert(frames.some(f => parseFloat(f.blur.slice(5)) > 2), 'content blurs during morph');
-        assert(frames.every(f => f.cardOpacity + f.detailOpacity > .99), 'no empty card during return');
-        assert(frames.every(f => f.scroll === 170), 'closing snapshot preserves table scroll');
-        assert(frames.every(f => f.text === color.expected), 'snapshot follows the live theme');
-        for (let i = 1; i < frames.length; i++) assert(frames[i].width <= frames[i - 1].width + .2, 'no full-size flash');
-        sameGeometry(await geometry(page), before, `close/${theme}/${fallback}`);
-        assert.equal(await firstCard.evaluate(el => el.style.opacity), '');
-        assert.equal(await page.evaluate(() => document.body.style.overflow), before.overflow);
-        reports.push({ theme, fallback, color, frames: frames.length });
+        for (const [route, trigger] of Object.entries(closeTriggers)) {
+          const opened = await captureMorph(page, openTrigger, true);
+          sameGeometry(await geometry(page), before, `open/${theme}/${fallback}/${route}`);
+          const color = await contrast(page); assert.equal(color.foreground, color.expected); assert(color.ratio >= 4.5);
+          if (!fallback && route === 'button') await page.locator('.gpu-process-panel').screenshot({ path: path.join(output, `panel-${theme}.png`) });
+          await page.locator('.gpu-process-table-wrap').evaluate(el => { el.scrollTop = 170; });
+          const closed = await captureMorph(page, trigger, false);
+          const openHandoff = checkMorph(opened, true, color.expected);
+          const closeHandoff = checkMorph(closed, false, color.expected);
+          assert(openHandoff < .35, `the table takes over early in the expansion (${openHandoff})`);
+          assert(Math.abs(openHandoff - closeHandoff) < .07, `handoff width matches in both directions (${openHandoff} vs ${closeHandoff})`);
+          assert(closed.every(frame => frame.scroll === 170), 'closing snapshot preserves table scroll');
+          sameGeometry(await geometry(page), before, `close/${theme}/${fallback}/${route}`);
+          assert.equal(await firstCard.evaluate(el => el.style.opacity), '');
+          assert.equal(await page.evaluate(() => document.body.style.overflow), before.overflow);
+          reports.push({ theme, fallback, route, color, openHandoff, closeHandoff });
+        }
       }
-      await firstCard.locator('.gpu-detail-open').click(); await waitOpen(page);
-      await page.evaluate(() => {
-        window.__particleFrames = [];
-        document.querySelector('.gpu-process-backdrop').click();
-        const capture = () => {
-          const panel = document.querySelector('.gpu-process-panel'); if (!panel) return;
-          const canvas = document.querySelector('.gpu-process-particles');
-          window.__particleFrames.push({ filter: panel.style.filter, mask: panel.style.maskImage, canvas: Boolean(canvas), canvasFilter: canvas ? getComputedStyle(canvas).filter : '' });
-          requestAnimationFrame(capture);
-        };
-        requestAnimationFrame(capture);
-      });
-      await waitClosed(page);
-      const particles = await page.evaluate(() => window.__particleFrames);
-      assert(particles.some(f => f.canvas && f.filter === 'blur(8px)' && f.mask), 'central remnant blurs during edge dissolve');
-      assert(particles.filter(f => f.canvas).every(f => f.canvasFilter === 'none'), 'particle layer remains sharp');
-      assert.equal(await page.locator('.gpu-process-particles, .gpu-process-morph').count(), 0);
     }
     await page.evaluate(() => { document.documentElement.style.scrollbarGutter = ''; });
     // Confirmation stays live and independent of the decorative snapshots.
@@ -154,9 +176,10 @@ async function contrast(page) {
       await page.evaluate(() => { window.__gpuFixture.state.status = 'connected'; window.__gpuFixture.send(); });
     }
     await page.emulateMedia({ reducedMotion: 'reduce' });
-    for (const route of ['blur', 'particles']) {
+    for (const route of ['button', 'backdrop']) {
       await firstCard.locator('.gpu-detail-open').click(); await waitOpen(page);
-      if (route === 'blur') await page.keyboard.press('Escape'); else await page.locator('.gpu-process-backdrop').click({ position: { x: 10, y: 10 } });
+      if (route === 'button') await page.locator(closeTriggers.button).click();
+      else await page.locator(closeTriggers.backdrop).click({ position: { x: 10, y: 10 } });
       await waitClosed(page); assert.equal(await page.locator('.gpu-process-particles, .gpu-process-morph').count(), 0);
     }
     await page.setViewportSize({ width: 1000, height: 850 });
@@ -167,7 +190,7 @@ async function contrast(page) {
     await page.getByTestId('gpu-card').screenshot({ path: path.join(output, 'custom-users.png') });
     assert.deepEqual(errors, []);
     await fs.writeFile(path.join(output, 'motion-smoke.json'), JSON.stringify({ passed: true, reports, errors }, null, 2));
-    console.log('GPU panel smoke passed: custom user list, theme contrast, Gaussian handoff, blurred edge dissolve, scrollbar stability, confirmation, interruption and reduced motion.');
+    console.log('GPU panel smoke passed: custom user list, theme contrast, matching Gaussian handoff in both directions and close paths, scrollbar stability, confirmation, interruption and reduced motion.');
     console.log(JSON.stringify(reports));
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

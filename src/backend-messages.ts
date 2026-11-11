@@ -605,6 +605,14 @@ function translateReason(source: string): string | undefined {
 export function backendMessage(source: string | null | undefined, language: 'zh' | 'en'): string {
   if (!source) return '';
   if (language === 'zh') return source;
+  const hopError = /^跳板机 (\d+)(?:（(.+)）)?：([\s\S]+)$/.exec(source);
+  if (hopError) return `Jump host ${hopError[1]}${hopError[2] ? ` (${hopError[2]})` : ''}: ${backendMessage(hopError[3], language)}`;
+  const targetError = /^目标服务器（(.+)）：([\s\S]+)$/.exec(source);
+  if (targetError) return `Target server (${targetError[1]}): ${backendMessage(targetError[2], language)}`;
+  const forwardingError = /^无法通过上一级转发连接：([\s\S]+)$/.exec(source);
+  if (forwardingError) return `Cannot connect through the previous hop: ${forwardingError[1]}`;
+  const hopClosed = /^跳板机连接中断（(.+)）$/.exec(source);
+  if (hopClosed) return `Jump host disconnected (${hopClosed[1]})`;
   const translated = exact.get(source);
   if (translated) return translated;
   const reason = translateReason(source);

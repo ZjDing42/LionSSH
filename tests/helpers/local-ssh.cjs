@@ -295,6 +295,8 @@ async function localSshServer(options = {}) {
         });
       });
       if (!options.disableDirectForwarding) client.on('tcpip', (accept, reject, info) => {
+        stats.lifecycle.push({ type: 'direct-forward', ...info });
+        if (options.allowedForwardPorts && !options.allowedForwardPorts.includes(Number(info.destPort))) return reject();
         const socket = trackSocket(net.connect({ host: info.destIP, port: Number(info.destPort) }));
         const rejectConnect = () => reject();
         socket.once('connect', () => {

@@ -318,13 +318,16 @@ impl Shared {
 
 /// Cancelling a connection interrupts the physical socket even when a server
 /// never replies to a forwarding/authentication request.
-struct CancelIo {
-    socket: TcpStream,
+trait SshIo: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> SshIo for T {}
+
+struct CancelIo<T> {
+    socket: T,
     cancelled: Pin<Box<WaitForCancellationFutureOwned>>,
 }
 
-impl CancelIo {
-    fn new(socket: TcpStream, cancel: CancellationToken) -> Self {
+impl<T> CancelIo<T> {
+    fn new(socket: T, cancel: CancellationToken) -> Self {
         Self {
             socket,
             cancelled: Box::pin(cancel.cancelled_owned()),
@@ -343,7 +346,7 @@ impl CancelIo {
     }
 }
 
-impl AsyncRead for CancelIo {
+impl<T: AsyncRead + Unpin> AsyncRead for CancelIo<T> {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -356,7 +359,7 @@ impl AsyncRead for CancelIo {
     }
 }
 
-impl AsyncWrite for CancelIo {
+impl<T: AsyncWrite + Unpin> AsyncWrite for CancelIo<T> {
     fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -390,7 +393,7 @@ impl Drop for ConnectGuard {
 struct Handler {
     shared: Arc<Shared>,
     trusted: HashSet<String>,
-    trust: TrustReceiver,
+    trust: Arc<AsyncMutex<TrustReceiver>>,
 }
 
 impl client::Handler for Handler {
@@ -427,10 +430,11 @@ impl client::Handler for Handler {
             "keyType": public.algorithm().to_string(), "host":self.shared.host,
             "port":self.shared.port, "changed":!self.trusted.is_empty()}));
         let decision = timeout(Duration::from_secs(120), async {
+            let mut trust = self.trust.lock().await;
             loop {
                 tokio::select! {
                     _ = self.shared.transport_cancel.cancelled() => return None,
-                    decision = self.trust.recv() => match decision {
+                    decision = trust.recv() => match decision {
                         Some(decision) if decision.fingerprint == fingerprint => return Some(decision.accepted),
                         Some(_) => continue,
                         None => return None,
@@ -555,15 +559,114 @@ pub struct Connection {
     shared: Arc<Shared>,
     lifecycle: AsyncMutex<()>,
     terminal_opens: Arc<Semaphore>,
+    upstream: Mutex<Vec<Arc<Connection>>>,
 }
 
 impl Connection {
+    #[cfg(test)]
     pub async fn connect(
         profile: Value,
         secrets: Value,
         trusted: Vec<String>,
         events: EventSink,
         trust: TrustReceiver,
+    ) -> Result<Arc<Self>, String> {
+        Self::connect_route(profile, secrets, vec![trusted], events, trust).await
+    }
+
+    pub async fn connect_route(
+        profile: Value,
+        secrets: Value,
+        trusted: Vec<Vec<String>>,
+        events: EventSink,
+        trust: TrustReceiver,
+    ) -> Result<Arc<Self>, String> {
+        let endpoints = crate::model::connection_endpoints(&profile);
+        let has_hops = endpoints.len() > 1;
+        let trust = Arc::new(AsyncMutex::new(trust));
+        let mut upstream: Vec<Arc<Self>> = Vec::new();
+        // If this future is cancelled, every already-authenticated hop must close.
+        let mut guards = Vec::new();
+        for (index, endpoint) in endpoints.iter().enumerate() {
+            let final_host = index + 1 == endpoints.len();
+            let label = crate::model::endpoint_label(&profile, index);
+            let mut transport: Option<Box<dyn SshIo>> = None;
+            if let Some(previous) = upstream.last() {
+                let channel = open_forward(
+                    &previous.handle,
+                    &text(endpoint, "host", ""),
+                    port(endpoint, "port", 22)?,
+                    "127.0.0.1",
+                    0,
+                )
+                .await
+                .map_err(|error| format!("{label}：无法通过上一级转发连接：{}", error.message))?;
+                transport = Some(Box::new(channel.into_stream()));
+            }
+            let mut config = (*endpoint).clone();
+            config["id"] = profile["id"].clone();
+            if !final_host {
+                config["tunnels"] = json!([]);
+            }
+            let credentials = if final_host {
+                secrets.clone()
+            } else {
+                secrets["jumpHosts"][endpoint["id"].as_str().unwrap_or("")].clone()
+            };
+            let sink = events.clone();
+            let endpoint_name = text(endpoint, "name", "");
+            let route_sink: EventSink = Arc::new(move |event, mut payload| {
+                if !final_host
+                    && !["host-key", "status"].contains(&payload["type"].as_str().unwrap_or(""))
+                {
+                    return;
+                }
+                if payload["type"] == "host-key" {
+                    payload["routeIndex"] = json!(index);
+                    payload["endpointName"] = json!(endpoint_name);
+                    payload["isJumpHost"] = json!(!final_host);
+                }
+                sink(event, payload);
+            });
+            let connection = Self::connect_transport(
+                config,
+                credentials,
+                trusted.get(index).cloned().unwrap_or_default(),
+                route_sink,
+                trust.clone(),
+                transport,
+            )
+            .await
+            .map_err(|error| {
+                if has_hops {
+                    format!("{label}：{error}")
+                } else {
+                    error
+                }
+            })?;
+            if final_host {
+                *connection.upstream.lock().unwrap() = upstream;
+                for guard in &mut guards {
+                    let guard: &mut ConnectGuard = guard;
+                    guard.0 = None;
+                }
+                return Ok(connection);
+            }
+            guards.push(ConnectGuard(Some(
+                connection.shared.transport_cancel.clone(),
+            )));
+            upstream.push(connection);
+        }
+        Err("连接配置不完整".into())
+    }
+
+    async fn connect_transport(
+        profile: Value,
+        secrets: Value,
+        trusted: Vec<String>,
+        events: EventSink,
+        trust: Arc<AsyncMutex<TrustReceiver>>,
+        transport: Option<Box<dyn SshIo>>,
     ) -> Result<Arc<Self>, String> {
         let profile_id = text(&profile, "id", "");
         let host = text(&profile, "host", "");
@@ -652,14 +755,19 @@ impl Connection {
                 }
             }
         });
-        let socket = timeout(
-            CONNECT_TIMEOUT,
-            TcpStream::connect((host.as_str(), ssh_port)),
-        )
-        .await
-        .map_err(|_| "SSH 连接超时".to_string())?
-        .map_err(|e| e.to_string())?;
-        let _ = socket.set_nodelay(true);
+        let socket: Box<dyn SshIo> = if let Some(stream) = transport {
+            stream
+        } else {
+            let socket = timeout(
+                CONNECT_TIMEOUT,
+                TcpStream::connect((host.as_str(), ssh_port)),
+            )
+            .await
+            .map_err(|_| "SSH 连接超时".to_string())?
+            .map_err(|e| e.to_string())?;
+            let _ = socket.set_nodelay(true);
+            Box::new(socket)
+        };
         let handler = Handler {
             shared: shared.clone(),
             trusted: trusted.into_iter().collect(),
@@ -743,6 +851,7 @@ impl Connection {
             shared,
             lifecycle: AsyncMutex::new(()),
             terminal_opens: Arc::new(Semaphore::new(16)),
+            upstream: Mutex::new(Vec::new()),
         });
         guard.0 = None;
         for config in configs {
@@ -774,6 +883,19 @@ impl Connection {
                     connection.shared.fail("SSH 连接中断");
                     break;
                 }
+                if let Some(hop) = connection
+                    .upstream
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|hop| hop.is_closed())
+                {
+                    connection.shared.fail(format!(
+                        "跳板机连接中断（{}:{}）",
+                        hop.shared.host, hop.shared.port
+                    ));
+                    break;
+                };
             }
         });
         Ok(connection)
@@ -930,6 +1052,14 @@ impl Connection {
     }
 
     pub async fn close(&self) {
+        self.close_transport().await;
+        let upstream = std::mem::take(&mut *self.upstream.lock().unwrap());
+        for hop in upstream.iter().rev() {
+            hop.close_transport().await;
+        }
+    }
+
+    async fn close_transport(&self) {
         let _lifecycle = self.lifecycle.lock().await;
         let tunnels = self
             .shared
@@ -1052,6 +1182,9 @@ impl Connection {
 impl Drop for Connection {
     fn drop(&mut self) {
         self.shared.fail("连接已关闭");
+        for hop in self.upstream.lock().unwrap().iter() {
+            hop.shared.fail("连接已关闭");
+        }
     }
 }
 

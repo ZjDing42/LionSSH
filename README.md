@@ -13,6 +13,7 @@
 | Feature | What it does |
 | --- | --- |
 | Multiple SSH connections | Connect to servers independently using passwords, keyboard-interactive authentication, or private keys with optional passphrases. Confirm host fingerprints on first connection. |
+| Multi-hop SSH | Add and reorder jump hosts, configure credentials for each hop, and test each hop or the target before saving. |
 | Port tunnels | Manage forward and reverse tunnels with multiple rules, failure detection, and automatic recovery. |
 | NVIDIA GPU monitoring | See GPU usage, idle counts, process owners and per-GPU process details; confirm before ending your own processes. Supports scheduled checks, pause, and manual refresh. |
 | Slurm job management | View your jobs or all jobs, inspect status and queue reasons, query Priority, and cancel your own jobs after confirmation. |
@@ -28,13 +29,21 @@ The default is **System**: Chinese system locales use Simplified Chinese, and al
 
 Interface labels, dialogs, notifications, and tray menus follow this preference. Server names, custom terminal names, and remote terminal output keep their original content.
 
+## Jump hosts and connection tests
+
+When adding or editing a device, use **Add jump host** above the target's connection settings. Hosts connect from top to bottom, followed by the target server. Each hop supports a password or a local private key with an optional passphrase. Use the up/down buttons to change the order, or remove all jump hosts to connect directly.
+
+Each jump host and the target have a **Test connection** button. Testing a hop connects through the preceding hops; testing the target checks the full chain. Tests work before saving, support cancellation, and ask you to confirm unfamiliar host fingerprints. They do not replace an existing device connection. Jump hosts must allow SSH TCP forwarding to the next host.
+
+Terminals, SFTP, monitoring and port tunnels use the target connection through the configured chain. Remember credentials separately for each hop and the target when needed for automatic reconnection.
+
 ## GPU processes
 
 On Linux NVIDIA servers, GPU cards show unique process owners, excluding Xorg. The user with the highest PID appears first; a `+N` badge indicates additional users. Hover over the badge to see only those other users in a custom list. A single-user badge has no popup.
 
 Click a GPU card to open its process table, showing PID, process name, user, elapsed time, GPU memory and process type. It follows the GPU monitoring interval and also supports manual refresh. Only your own processes have a stop action: choose **Cancel**, **Terminate** or **Force stop** in the confirmation dialog. The backend rechecks ownership and process identity before signaling that PID. Ending a process does not actively cancel a Slurm job that launched it.
 
-The panel opens with a Gaussian blur transition. Close with `×` or Escape to return to the GPU card, or click outside for an edge-particle dissolve with a progressively blurred table remnant. Text follows the app theme, the page keeps its scrollbar space, and reduced-motion preferences are respected.
+The panel opens and closes with a Gaussian blur transition. Clicking outside, clicking `×` and pressing Escape all return the panel to its GPU card. The card and table crossfade at the same intermediate size in both directions, so the table appears while the panel is still expanding. Text follows the app theme, the page keeps its scrollbar space, and reduced-motion preferences are respected.
 
 ## Tools
 
@@ -74,7 +83,7 @@ Tool panels use the available window width with fixed side margins. Personal sto
 
 ## Download
 
-**[Download the latest release](https://github.com/ZjDing42/LionSSH/releases/latest)** · [v1.11.0 release notes](.github/release-notes/v1.11.0.md)
+**[Download the latest release](https://github.com/ZjDing42/LionSSH/releases/latest)** · [v1.12.0 release notes](.github/release-notes/v1.12.0.md)
 
 | Platform | Package |
 | --- | --- |
@@ -85,7 +94,7 @@ Tool panels use the available window width with fixed side margins. Personal sto
 
 Windows requires [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/); the installer downloads it if missing. The default installation directory is `%LOCALAPPDATA%\Programs\Lion SSH`, and you can choose another location.
 
-macOS packages use a full ad-hoc application signature, verified in CI for both the DMG and updater archive. They are not Developer ID signed or notarized by Apple. After copying the app to Applications, you may need to allow it in **System Settings → Privacy & Security → Open Anyway** if you trust the download. See [Apple's instructions](https://support.apple.com/en-us/102445).
+macOS packages use a full ad-hoc application signature. CI verifies the built app, the DMG and the updater archive, then checks packaged-app startup on Apple Silicon and Intel runners. Failed checks prevent publication as Latest. Packages are not Developer ID signed or notarized by Apple. After copying the app to Applications, you may need to allow it in **System Settings → Privacy & Security → Open Anyway** if you trust the download. See [Apple's instructions](https://support.apple.com/en-us/102445).
 
 ## Data
 

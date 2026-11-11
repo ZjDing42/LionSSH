@@ -4,7 +4,6 @@ import Icon from './Icon.vue';
 import { message, t } from '../i18n';
 import { processElapsed } from '../gpu-process';
 import { createGpuPanelMotion } from '../gpu-motion';
-import type { GpuCloseMotion } from '../gpu-motion';
 import type { GpuCard, GpuProcess, GpuProcessStopPreview, LionApi, Profile, ServerState } from '../types';
 
 const props = defineProps<{ card: GpuCard; profile: Profile; state: ServerState; api?: LionApi; origin: HTMLElement }>();
@@ -19,7 +18,6 @@ const preparing = ref<number | null>(null);
 const stopping = ref(false);
 const closing = ref(false);
 const opening = ref(true);
-const closeRoute = ref<GpuCloseMotion>('blur');
 const error = ref('');
 const notice = ref('');
 const now = ref(Date.now());
@@ -34,7 +32,7 @@ let motion: ReturnType<typeof createGpuPanelMotion> | undefined;
 let observer: ResizeObserver | undefined;
 let previousOverflow = '';
 let previousPaddingRight = '';
-let closeRequested: GpuCloseMotion | null = null;
+let closeRequested = false;
 let request = 0;
 
 function updateLayout() {
@@ -45,14 +43,13 @@ function updateLayout() {
   layout.value = { left: `${rect.left}px`, right: `${Math.max(0, innerWidth - rect.right)}px`,
     '--panel-left': css.paddingLeft, '--panel-right': css.paddingRight };
 }
-async function close(route: GpuCloseMotion = 'blur') {
+async function close() {
   if (stopping.value || closing.value) return;
-  if (opening.value) { closeRequested = route; return; }
+  if (opening.value) { closeRequested = true; return; }
   closing.value = true;
-  closeRoute.value = route;
   request++;
   preview.value = null;
-  try { await motion?.close(route); }
+  try { await motion?.close(); }
   catch { /* A visual effect must never prevent closing the live panel. */ }
   if (disposed) return;
   emit('close');
@@ -137,7 +134,7 @@ onMounted(async () => {
   opening.value = false;
   await nextTick();
   if (disposed) return;
-  if (closeRequested) void close(closeRequested);
+  if (closeRequested) void close();
   else panel.value?.focus({ preventScroll: true });
 });
 onUnmounted(() => {
@@ -155,8 +152,8 @@ onUnmounted(() => {
 
 <template>
   <Teleport to="body">
-    <div ref="overlay" class="gpu-process-overlay" :class="{ closing }" :data-motion="closing ? closeRoute : opening ? 'opening' : 'open'" :style="layout" @click.self="close('particles')">
-      <div ref="backdrop" class="gpu-process-backdrop" aria-hidden="true" @click="close('particles')" />
+    <div ref="overlay" class="gpu-process-overlay" :class="{ closing }" :data-motion="closing ? 'blur' : opening ? 'opening' : 'open'" :style="layout" @click.self="close()">
+      <div ref="backdrop" class="gpu-process-backdrop" aria-hidden="true" @click="close()" />
       <section ref="panel" class="gpu-process-panel" role="dialog" aria-modal="true" aria-labelledby="gpu-process-title" tabindex="-1" :inert="Boolean(preview) || closing || opening">
         <div class="gpu-process-content">
         <header class="gpu-process-header">
@@ -197,7 +194,6 @@ onUnmounted(() => {
 .gpu-process-content { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .gpu-process-overlay :deep(.gpu-process-morph) { position: absolute; z-index: 2; isolation: isolate; overflow: hidden; pointer-events: none; color: var(--text); background: var(--surface-soft); transform-origin: top left; will-change: left, top, width, height, filter; }
 .gpu-process-overlay :deep(.gpu-motion-layer) { position: absolute; left: 0; top: 0; margin: 0; min-height: 0; max-height: none; transform-origin: top left; pointer-events: none; box-shadow: none; transition: none; }
-.gpu-process-overlay :deep(.gpu-process-particles) { position: absolute; inset: 0; z-index: 3; width: 100%; height: 100%; pointer-events: none; }
 .gpu-process-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 18px 20px; border-bottom: 1px solid var(--line); }
 .gpu-process-header h2 { font-size: 17px; font-weight: 600; color: var(--text); }
 .gpu-process-header p { color: var(--text-subtle); font-size: 11px; margin-top: 5px; }

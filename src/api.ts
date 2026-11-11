@@ -58,6 +58,8 @@ function createTauriApi(): LionApi {
     saveProfile: (profile, secrets) => request('save-profile', profile, secrets),
     deleteProfile: id => request('delete-profile', id),
     connect: (id, secrets) => request('connect', id, secrets),
+    testConnection: (id, profile, secrets, through) => request('test-connection', id, profile, secrets, through),
+    cancelTestConnection: id => request('cancel-test-connection', id),
     disconnect: id => request('disconnect', id),
     refreshGpu: id => request('refresh-gpu', id),
     prepareGpuProcessStop: (id, gpuUuid, pid) => request('prepare-gpu-process-stop', id, gpuUuid, pid),

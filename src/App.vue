@@ -3,12 +3,13 @@ import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, react
 import Icon from './components/Icon.vue';
 import GpuProcessPanel from './components/GpuProcessPanel.vue';
 import GpuUserBadge from './components/GpuUserBadge.vue';
+import JumpHostsEditor from './components/JumpHostsEditor.vue';
 import { gpuUsers } from './gpu-process';
 import { api as desktopApi } from './api';
 import { applyLanguage, language, message, resolveLanguage, t } from './i18n';
 import { useCardHeight } from './useCardHeight';
 import type { LanguagePreference, LanguageState } from './types';
-import type { CodexState, GpuCard, GpuSettings, HostKeyRequest, JobCancelPreview, Profile, Secrets, ServerState, ShutdownNotice, SlurmJob, SlurmScope, ThemePreference, ThemeState, TmpCleanupPreview, Tunnel, UpdateState } from './types';
+import type { CodexState, GpuCard, GpuSettings, HostKeyRequest, JobCancelPreview, Profile, JumpHost, LoginSecret, Secrets, ServerState, ShutdownNotice, SlurmJob, SlurmScope, ThemePreference, ThemeState, TmpCleanupPreview, Tunnel, UpdateState } from './types';
 const api = window.lion ?? desktopApi;
 const TerminalWorkspace = defineAsyncComponent(() => import('./components/TerminalWorkspace.vue'));
 const FileWorkspace = defineAsyncComponent(() => import('./components/FileWorkspace.vue'));
@@ -65,6 +66,11 @@ const passwordVisible = ref(false);
 const devicePassword = ref('');
 const devicePassphrase = ref('');
 const rememberSecret = ref(false);
+const jumpSecrets = reactive<Record<string, LoginSecret>>({});
+const credentialJumpSecrets = reactive<Record<string, LoginSecret>>({});
+const connectionTestId = ref('');
+const connectionTestTarget = ref('');
+const connectionTestResults = reactive<Record<string, { text: string; error: boolean }>>({});
 const expandedGpu = ref(false);
 const gpuProcessTarget = ref<{ uuid: string; origin: HTMLElement } | null>(null);
 watch([selectedId, page, expandedGpu, shutdown], () => { gpuProcessTarget.value = null; });
@@ -207,7 +213,7 @@ function freshProfile(): Profile {
         id: crypto.randomUUID(), name: '', host: '', port: 22, username: '',
         authType: 'key', keyPath: '', autoReconnect: true,
         gpu: { enabled: true, intervalSec: 5, idleUtil: 5, idleMemoryMiB: 512, stableSamples: 2 },
-        tunnels: [],
+        tunnels: [], jumpHosts: [],
     };
 }
 function clone<T>(value: T): T { return JSON.parse(JSON.stringify(value)) as T; }
@@ -709,7 +715,11 @@ async function focusFirst() {
 }
 function activePanel(): HTMLElement | null { return document.querySelector('.host-modal') || document.querySelector('.confirm-modal') || document.querySelector('.credential-modal') || document.querySelector('.drawer'); }
 function openDevice(profile?: Profile) {
-    Object.assign(deviceDraft, clone(profile || freshProfile()));
+    cancelConnectionTest();
+    Object.assign(deviceDraft, clone(profile || freshProfile()), { jumpHosts: clone(profile?.jumpHosts || []) });
+    for (const key of Object.keys(jumpSecrets)) delete jumpSecrets[key];
+    for (const hop of deviceDraft.jumpHosts!) jumpSecrets[hop.id] = { remember: Boolean(hop.hasSavedSecret) };
+    clearConnectionTestResults();
     editing.value = Boolean(profile);
     devicePassword.value = '';
     devicePassphrase.value = '';
@@ -728,8 +738,59 @@ function openTunnel(tunnel?: Tunnel) {
     drawer.value = 'tunnel';
     void focusFirst();
 }
-function closeDrawer() { if (!busy.save)
-    drawer.value = null; }
+function closeDrawer() {
+    if (!busy.save) { cancelConnectionTest(); drawer.value = null; }
+}
+function clearConnectionTestResults() {
+    for (const key of Object.keys(connectionTestResults)) delete connectionTestResults[key];
+}
+function draftSecrets(): Secrets {
+    const saved = profiles.value.find(profile => profile.id === deviceDraft.id);
+    const prior = runtimeSecrets[deviceDraft.id];
+    const sameLogin = (left: Profile | JumpHost | undefined, right: Profile | JumpHost) => left && ['host', 'port', 'username', 'authType', 'keyPath'].every(key => left[key as keyof JumpHost] === right[key as keyof JumpHost]);
+    const hops: Record<string, LoginSecret> = {};
+    for (const hop of deviceDraft.jumpHosts || []) {
+        const previous = sameLogin(saved?.jumpHosts?.find(item => item.id === hop.id), hop) ? prior?.jumpHosts?.[hop.id] : undefined;
+        const entered = jumpSecrets[hop.id] || {};
+        hops[hop.id] = { ...previous, ...Object.fromEntries(Object.entries(entered).filter(([, value]) => value !== '' && value !== undefined)) };
+    }
+    return {
+        ...(sameLogin(saved, deviceDraft) ? prior : {}),
+        ...(deviceDraft.authType === 'password' ? { password: devicePassword.value || (sameLogin(saved, deviceDraft) ? prior?.password : undefined) } : { passphrase: devicePassphrase.value || (sameLogin(saved, deviceDraft) ? prior?.passphrase : undefined) }),
+        remember: rememberSecret.value, jumpHosts: hops,
+    };
+}
+function cancelConnectionTest() {
+    const id = connectionTestId.value;
+    if (!id) return;
+    connectionTestId.value = '';
+    connectionTestTarget.value = '';
+    hostRequests.value = hostRequests.value.filter(request => request.profileId !== id);
+    void api?.cancelTestConnection(id).catch(error => notify(cleanError(error), true));
+}
+async function testConnection(through?: string) {
+    if (!api || connectionTestId.value) return;
+    const id = `probe:${crypto.randomUUID()}`;
+    const target = through || 'target';
+    const profile = clone(deviceDraft);
+    const secrets = draftSecrets();
+    connectionTestId.value = id;
+    connectionTestTarget.value = target;
+    delete connectionTestResults[target];
+    try {
+        await api.testConnection(id, profile, secrets, through);
+        if (connectionTestId.value === id) connectionTestResults[target] = { text: '连接成功，SSH 登录已验证。', error: false };
+    } catch (error) {
+        if (connectionTestId.value === id) connectionTestResults[target] = { text: cleanError(error), error: true };
+    } finally {
+        hostRequests.value = hostRequests.value.filter(request => request.profileId !== id);
+        if (connectionTestId.value === id) { connectionTestId.value = ''; connectionTestTarget.value = ''; }
+    }
+}
+watch([deviceDraft, jumpSecrets, devicePassword, devicePassphrase], () => {
+    clearConnectionTestResults();
+    cancelConnectionTest();
+}, { deep: true, flush: 'sync' });
 function replaceProfile(profile: Profile) {
     const index = profiles.value.findIndex(p => p.id === profile.id);
     if (index < 0)
@@ -754,12 +815,11 @@ async function saveDevice() {
     profile.host = profile.host.trim();
     profile.username = profile.username.trim();
     profile.keyPath = profile.keyPath.replace(/[\u202a-\u202e\u2066-\u2069]/g, '').trim();
-    const secrets: Secrets = profile.authType === 'password' ? { password: devicePassword.value || undefined, remember: rememberSecret.value } : { passphrase: devicePassphrase.value || undefined, remember: rememberSecret.value };
+    const secrets = draftSecrets();
     const success = await action('save', async () => {
         const saved = await api!.saveProfile(profile, secrets);
         replaceProfile(saved);
-        if (secrets.password || secrets.passphrase)
-            runtimeSecrets[saved.id] = secrets;
+        runtimeSecrets[saved.id] = secrets;
         selectProfile(saved);
     });
     if (success) {
@@ -794,11 +854,13 @@ async function chooseKey() {
         deviceDraft.keyPath = path; });
 }
 async function requestConnection(profile: Profile) {
-    if (profile.authType === 'password' && !profile.hasSavedSecret && !runtimeSecrets[profile.id]?.password) {
+    if (profile.authType === 'password' && !profile.hasSavedSecret && !runtimeSecrets[profile.id]?.password || profile.jumpHosts?.some(hop => hop.authType === 'password' && !hop.hasSavedSecret && !runtimeSecrets[profile.id]?.jumpHosts?.[hop.id]?.password)) {
         credentialProfile.value = profile;
         credentialPassword.value = '';
         credentialPassphrase.value = '';
         credentialRemember.value = false;
+        for (const key of Object.keys(credentialJumpSecrets)) delete credentialJumpSecrets[key];
+        for (const hop of profile.jumpHosts || []) credentialJumpSecrets[hop.id] = { ...runtimeSecrets[profile.id]?.jumpHosts?.[hop.id] };
         void focusFirst();
         return;
     }
@@ -808,16 +870,22 @@ async function submitCredentials() {
     const profile = credentialProfile.value;
     if (!profile)
         return;
-    const secrets: Secrets = { password: credentialPassword.value || undefined, passphrase: credentialPassphrase.value || undefined };
-    if (credentialPassword.value || credentialPassphrase.value)
-        runtimeSecrets[profile.id] = secrets;
+    const secrets: Secrets = {
+        ...runtimeSecrets[profile.id],
+        ...(credentialPassword.value ? { password: credentialPassword.value } : {}),
+        ...(credentialPassphrase.value ? { passphrase: credentialPassphrase.value } : {}),
+        remember: credentialRemember.value ? true : undefined,
+        jumpHosts: clone(credentialJumpSecrets),
+    };
+    runtimeSecrets[profile.id] = secrets;
     credentialProfile.value = null;
     await action(`connect:${profile.id}`, async () => {
-        if (credentialRemember.value && (secrets.password || secrets.passphrase))
-            replaceProfile(await api!.saveProfile(clone(profile), { ...secrets, remember: true }));
+        if (credentialRemember.value || Object.values(secrets.jumpHosts || {}).some(secret => secret.remember))
+            replaceProfile(await api!.saveProfile(clone(profile), secrets));
         await api!.connect(profile.id, secrets);
     });
 }
+
 async function disconnect(profile: Profile) {
     await action(`disconnect:${profile.id}`, () => api!.disconnect(profile.id));
 }
@@ -875,7 +943,7 @@ async function trustHost(accepted: boolean) {
     if (!request)
         return;
     if (await action('trust', () => api!.trustHost(request.profileId, accepted, request.fingerprint))) {
-        hostRequests.value = hostRequests.value.filter(pending => pending.profileId !== request.profileId || pending.fingerprint !== request.fingerprint);
+        hostRequests.value = hostRequests.value.filter(pending => pending !== request);
     }
 }
 function keyHandler(event: KeyboardEvent) {
@@ -959,11 +1027,11 @@ async function initialize() {
     }
 }
 function queueHostKey(request: HostKeyRequest) {
-    if (shutdown.value)
+    if (shutdown.value || request.connectionTest && request.profileId !== connectionTestId.value)
         return;
     if (states[request.profileId] && states[request.profileId].status !== 'awaiting-trust')
         return;
-    if (!hostRequests.value.some(r => r.profileId === request.profileId && r.fingerprint === request.fingerprint))
+    if (!hostRequests.value.some(r => r.profileId === request.profileId && r.fingerprint === request.fingerprint && r.routeIndex === request.routeIndex))
         hostRequests.value.push(request);
     void focusFirst();
 }
@@ -1013,7 +1081,7 @@ onMounted(() => {
     }
     void initialize();
 });
-onUnmounted(() => { disposed = true; clearInterval(clockId); removeState?.(); removeHost?.(); removeTheme?.(); removeLanguage?.(); removeShutdown?.(); removeBackendError?.(); removeUpdate?.(); systemTheme.removeEventListener('change', systemThemeChanged); window.removeEventListener('languagechange', systemLanguageChanged); document.removeEventListener('keydown', keyHandler); });
+onUnmounted(() => { cancelConnectionTest(); disposed = true; clearInterval(clockId); removeState?.(); removeHost?.(); removeTheme?.(); removeLanguage?.(); removeShutdown?.(); removeBackendError?.(); removeUpdate?.(); systemTheme.removeEventListener('change', systemThemeChanged); window.removeEventListener('languagechange', systemLanguageChanged); document.removeEventListener('keydown', keyHandler); });
 </script>
 
 <template>
@@ -1032,7 +1100,7 @@ onUnmounted(() => { disposed = true; clearInterval(clockId); removeState?.(); re
         <div class="brand-mark">
           <svg viewBox="0 0 40 40" fill="none" aria-hidden="true"><path d="m9 10 5-4 6 2 6-2 5 4 3 11-6 12-8 3-8-3-6-12 3-11Z" fill="currentColor" opacity=".18"/><path d="m12 13 4 1 4-3 4 3 4-1 2 9-4 7-6 3-6-3-4-7 2-9Z" stroke="currentColor" stroke-width="1.8"/><path d="m14 20 3 1m9-1-3 1m-5 3h4l-2 3-2-3Zm2 3v2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </div>
-        <div><strong>Lion <span>SSH</span></strong><small>{{ t('让连接，始终在线') }}</small></div>
+        <div><strong>Lion <span>SSH</span></strong></div>
       </div>
       <div class="sidebar-section-title"><span>{{ t('我的设备') }}</span><button class="icon-button subtle" :title="t('添加设备')" :aria-label="t('添加设备')" @click="openDevice()"><Icon name="plus" :size="18" /></button></div>
       <div class="server-list">
@@ -1179,21 +1247,27 @@ onUnmounted(() => { disposed = true; clearInterval(clockId); removeState?.(); re
     <GpuProcessPanel v-if="gpuProcessTarget && openedGpu && selected && currentState" :key="`${selected.id}:${openedGpu.uuid}`" :card="openedGpu" :profile="selected" :state="currentState" :api="api" :origin="gpuProcessTarget.origin" @close="gpuProcessTarget = null" />
   </div>
 
-  <Transition name="drawer"><div v-if="drawer" class="drawer-backdrop" @click.self="closeDrawer()"><section class="drawer" role="dialog" aria-modal="true" :aria-labelledby="drawer === 'device' ? 'device-form-title' : 'tunnel-form-title'"><div class="drawer-header"><div><span class="eyebrow">{{ drawer === 'device' ? 'DEVICE SETTINGS' : 'TUNNEL SETTINGS' }}</span><h2 :id="drawer === 'device' ? 'device-form-title' : 'tunnel-form-title'">{{ t(editing ? drawer === 'device' ? '编辑设备' : '编辑隧道' : drawer === 'device' ? '添加设备' : '添加隧道') }}</h2></div><button class="icon-button" :aria-label="t('关闭设置')" @click="closeDrawer()"><Icon name="close" /></button></div>
-      <form v-if="drawer === 'device'" class="drawer-form" @submit.prevent="saveDevice"><div class="form-body"><div class="form-section-title"><Icon name="server" :size="16" />{{ t('连接信息') }}</div><label class="field">{{ t('设备名称') }}<input v-model="deviceDraft.name" :placeholder="t('例如：训练服务器')" maxlength="80" required /></label><div class="form-row host-row"><label class="field">{{ t('服务器地址') }}<input v-model="deviceDraft.host" :placeholder="t('IP 地址或主机名')" maxlength="255" required /></label><label class="field">{{ t('端口') }}<input v-model.number="deviceDraft.port" type="number" min="1" max="65535" required /></label></div><label class="field">{{ t('用户名') }}<input v-model="deviceDraft.username" :placeholder="t('例如：user')" maxlength="128" required autocomplete="off" /></label><div class="form-section-title"><Icon name="shield" :size="16" />{{ t('认证方式') }}</div><div class="segmented-control"><button type="button" :class="{ active: deviceDraft.authType === 'key' }" @click="deviceDraft.authType = 'key'"><Icon name="key" :size="16" />{{ t('SSH 密钥') }}</button><button type="button" :class="{ active: deviceDraft.authType === 'password' }" @click="deviceDraft.authType = 'password'"><Icon name="lock" :size="16" />{{ t('密码') }}</button></div><template v-if="deviceDraft.authType === 'key'"><label class="field">{{ t('私钥文件') }}<div class="input-with-button"><input v-model="deviceDraft.keyPath" :placeholder="t('选择本机私钥文件')" required /><button type="button" class="icon-button" :title="t('选择私钥文件')" :aria-label="t('选择私钥文件')" @click="chooseKey()"><Icon name="folder" :size="18" /></button></div><small>{{ t('支持 OpenSSH 私钥，文件内容仅用于建立连接。') }}</small></label><label class="field">{{ t('密钥口令') }}<span class="field-optional">{{ t('可选') }}</span><input v-model="devicePassphrase" type="password" :placeholder="editing ? t('留空使用已有口令或未加密密钥') : t('私钥未加密时留空')" autocomplete="new-password" /></label></template><label v-else class="field">{{ t('连接密码') }}<div class="input-with-button"><input v-model="devicePassword" :type="passwordVisible ? 'text' : 'password'" :placeholder="editing ? t('留空保留已有密码') : t('可稍后在连接时输入')" autocomplete="new-password" /><button type="button" class="icon-button" :aria-label="passwordVisible ? t('隐藏密码') : t('显示密码')" @click="passwordVisible = !passwordVisible"><Icon name="eye" :size="17" /></button></div></label><label class="checkbox-row"><input v-model="rememberSecret" type="checkbox" /><span>{{ t(deviceDraft.authType === 'password' ? '记住密码' : '记住密钥口令') }}<small>{{ t('使用系统加密存储；不勾选则仅在本次运行中使用。') }}</small></span></label><div class="form-section-title"><Icon name="activity" :size="16" />{{ t('连接与监测') }}</div><label class="checkbox-row"><input v-model="deviceDraft.autoReconnect" type="checkbox" /><span>{{ t('断线后自动重连') }}<small>{{ t('保留配置，关闭旧会话后按递增间隔恢复。') }}</small></span></label><label class="checkbox-row"><input v-model="deviceDraft.gpu.enabled" type="checkbox" /><span>{{ t('自动监测 NVIDIA 显卡') }}<small>{{ t('读取 nvidia-smi 与进程信息。') }}</small></span></label><label class="field inline-field">{{ t('检测间隔') }}<div><input v-model.number="deviceDraft.gpu.intervalSec" type="number" min="2" max="300" required /><span>{{ t('秒') }}</span></div></label><div class="form-note"><Icon name="info" :size="17" /><span>{{ t('首次连接需要确认服务器指纹。连接后，隧道和显卡监测会随设备独立运行。') }}</span></div><div v-if="formError" class="form-error" role="alert">{{ message(formError) }}</div></div><div class="drawer-footer"><button type="button" class="button secondary" @click="closeDrawer()">{{ t('取消') }}</button><button type="submit" data-testid="device-save" class="button primary" :disabled="busy.save">{{ busy.save ? t("正在保存") : t("保存设备") }}<Icon name="check" :size="16" /></button></div></form>
+  <Transition name="drawer"><div v-if="drawer" class="drawer-backdrop" @click.self="closeDrawer()"><section class="drawer" role="dialog" aria-modal="true" :aria-labelledby="drawer === 'device' ? 'device-form-title' : 'tunnel-form-title'"><div class="drawer-header"><div><span v-if="drawer === 'tunnel'" class="eyebrow">TUNNEL SETTINGS</span><h2 :id="drawer === 'device' ? 'device-form-title' : 'tunnel-form-title'">{{ t(editing ? drawer === 'device' ? '编辑设备' : '编辑隧道' : drawer === 'device' ? '添加设备' : '添加隧道') }}</h2></div><button class="icon-button" :aria-label="t('关闭设置')" @click="closeDrawer()"><Icon name="close" /></button></div>
+      <form v-if="drawer === 'device'" class="drawer-form" @submit.prevent="saveDevice"><div class="form-body"><JumpHostsEditor v-model="deviceDraft.jumpHosts!" :secrets="jumpSecrets" :disabled="Boolean(connectionTestId) || busy.save || !api" :testing="connectionTestTarget" :results="connectionTestResults" :pick-key="() => api!.pickKey()" @test="testConnection" @cancel="cancelConnectionTest" /><fieldset class="connection-fields" :disabled="Boolean(connectionTestId) || busy.save"><div class="form-section-title"><Icon name="server" :size="16" />{{ t('连接信息') }}</div><label class="field">{{ t('设备名称') }}<input v-model="deviceDraft.name" :placeholder="t('例如：训练服务器')" maxlength="80" required /></label><div class="form-row host-row"><label class="field">{{ t('服务器地址') }}<input v-model="deviceDraft.host" :placeholder="t('IP 地址或主机名')" maxlength="255" required /></label><label class="field">{{ t('端口') }}<input v-model.number="deviceDraft.port" type="number" min="1" max="65535" required /></label></div><label class="field">{{ t('用户名') }}<input v-model="deviceDraft.username" :placeholder="t('例如：user')" maxlength="128" required autocomplete="off" /></label><div class="form-section-title"><Icon name="shield" :size="16" />{{ t('认证方式') }}</div><div class="segmented-control"><button type="button" :class="{ active: deviceDraft.authType === 'key' }" @click="deviceDraft.authType = 'key'"><Icon name="key" :size="16" />{{ t('SSH 密钥') }}</button><button type="button" :class="{ active: deviceDraft.authType === 'password' }" @click="deviceDraft.authType = 'password'"><Icon name="lock" :size="16" />{{ t('密码') }}</button></div><template v-if="deviceDraft.authType === 'key'"><label class="field">{{ t('私钥文件') }}<div class="input-with-button"><input v-model="deviceDraft.keyPath" :placeholder="t('选择本机私钥文件')" required /><button type="button" class="icon-button" :title="t('选择私钥文件')" :aria-label="t('选择私钥文件')" @click="chooseKey()"><Icon name="folder" :size="18" /></button></div><small>{{ t('支持 OpenSSH 私钥，文件内容仅用于建立连接。') }}</small></label><label class="field">{{ t('密钥口令') }}<span class="field-optional">{{ t('可选') }}</span><input v-model="devicePassphrase" type="password" :placeholder="editing ? t('留空使用已有口令或未加密密钥') : t('私钥未加密时留空')" autocomplete="new-password" /></label></template><label v-else class="field">{{ t('连接密码') }}<div class="input-with-button"><input v-model="devicePassword" :type="passwordVisible ? 'text' : 'password'" :placeholder="editing ? t('留空保留已有密码') : t('可稍后在连接时输入')" autocomplete="new-password" /><button type="button" class="icon-button" :aria-label="passwordVisible ? t('隐藏密码') : t('显示密码')" @click="passwordVisible = !passwordVisible"><Icon name="eye" :size="17" /></button></div></label><label class="checkbox-row"><input v-model="rememberSecret" type="checkbox" /><span>{{ t(deviceDraft.authType === 'password' ? '记住密码' : '记住密钥口令') }}<small>{{ t('使用系统加密存储；不勾选则仅在本次运行中使用。') }}</small></span></label></fieldset><div class="target-connection-test"><button v-if="connectionTestTarget === 'target'" type="button" class="button secondary" @click="cancelConnectionTest">{{ t('取消测试') }}</button><button v-else type="button" class="button secondary" data-testid="test-target-connection" :disabled="Boolean(connectionTestId) || busy.save || !api" @click="testConnection()"><Icon name="link" :size="15" />{{ t('测试连接') }}</button><span v-if="connectionTestTarget === 'target'" role="status">{{ t('正在测试连接…') }}</span><small v-else-if="deviceDraft.jumpHosts?.length">{{ t('通过全部跳板机测试目标服务器。') }}</small></div><p v-if="connectionTestResults.target" class="connection-test-result" :class="{ error: connectionTestResults.target.error }" role="status">{{ message(connectionTestResults.target.text) }}</p><div class="form-section-title"><Icon name="activity" :size="16" />{{ t('连接与监测') }}</div><label class="checkbox-row"><input v-model="deviceDraft.autoReconnect" type="checkbox" /><span>{{ t('断线后自动重连') }}<small>{{ t('保留配置，关闭旧会话后按递增间隔恢复。') }}</small></span></label><label class="checkbox-row"><input v-model="deviceDraft.gpu.enabled" type="checkbox" /><span>{{ t('自动监测 NVIDIA 显卡') }}<small>{{ t('读取 nvidia-smi 与进程信息。') }}</small></span></label><label class="field inline-field">{{ t('检测间隔') }}<div><input v-model.number="deviceDraft.gpu.intervalSec" type="number" min="2" max="300" required /><span>{{ t('秒') }}</span></div></label><div class="form-note"><Icon name="info" :size="17" /><span>{{ t('首次连接需要确认服务器指纹。连接后，隧道和显卡监测会随设备独立运行。') }}</span></div><div v-if="formError" class="form-error" role="alert">{{ message(formError) }}</div></div><div class="drawer-footer"><button type="button" class="button secondary" @click="closeDrawer()">{{ t('取消') }}</button><button type="submit" data-testid="device-save" class="button primary" :disabled="busy.save || Boolean(connectionTestId)">{{ busy.save ? t("正在保存") : t("保存设备") }}<Icon name="check" :size="16" /></button></div></form>
       <form v-else class="drawer-form" @submit.prevent="saveTunnel"><div class="form-body"><div class="form-context"><Icon name="server" :size="16" />{{ selected?.name }}<span>{{ selected?.host }}</span></div><label class="field">{{ t('隧道名称') }}<span class="field-optional">{{ t('可选') }}</span><input v-model="tunnelDraft.name" :placeholder="t('例如：TensorBoard')" maxlength="80" /></label><label class="field">{{ t('转发方向') }}</label><div class="segmented-control"><button type="button" :class="{ active: tunnelDraft.direction === 'local' }" @click="tunnelDraft.direction = 'local'"><Icon name="arrow" :size="16" />{{ t('正向隧道') }}</button><button type="button" :class="{ active: tunnelDraft.direction === 'remote' }" @click="tunnelDraft.direction = 'remote'"><Icon name="exchange" :size="16" />{{ t('反向隧道') }}</button></div><div class="direction-explanation"><span>{{ tunnelDraft.direction === 'local' ? t("本机端口") : t("服务器端口") }}</span><Icon name="arrow" :size="16" /><span>SSH</span><Icon name="arrow" :size="16" /><span>{{ tunnelDraft.direction === 'local' ? t("远端服务") : t("本机侧服务") }}</span></div><div class="form-section-title"><Icon name="link" :size="16" />{{ tunnelDraft.direction === 'local' ? t("本机监听") : t("服务器监听") }}</div><div class="form-row host-row"><label class="field">{{ t('监听地址') }}<input v-model="tunnelDraft.bindHost" placeholder="127.0.0.1" required maxlength="255" /></label><label class="field">{{ t('监听端口') }}<input v-model.number="tunnelDraft.bindPort" type="number" min="1" max="65535" required /></label></div><div class="form-section-title"><Icon name="arrow" :size="16" />{{ tunnelDraft.direction === 'local' ? t("远端目标") : t("本机侧目标") }}</div><div class="form-row host-row"><label class="field">{{ t('目标地址') }}<input v-model="tunnelDraft.targetHost" placeholder="127.0.0.1" required maxlength="255" /></label><label class="field">{{ t('目标端口') }}<input v-model.number="tunnelDraft.targetPort" type="number" min="1" max="65535" required /></label></div><label class="field inline-field">{{ t('连通性检测间隔') }}<div><input v-model.number="tunnelDraft.healthIntervalSec" type="number" min="5" max="300" required /><span>{{ t('秒') }}</span></div></label><label class="checkbox-row"><input v-model="tunnelDraft.enabled" type="checkbox" /><span>{{ t('启用这条隧道') }}<small>{{ t('设备连接后自动建立；手动暂停后不会自动重启。') }}</small></span></label><div class="form-note"><Icon name="info" :size="17" /><span>{{ tunnelDraft.direction === 'remote' ? t("远端监听地址能否对外访问取决于服务器的转发权限。无法探测完整路径时，状态会显示未验证。") : t("目标地址从服务器一侧访问。目标服务未启动时会提示不可用，并继续检测。") }}</span></div><div v-if="formError" class="form-error" role="alert">{{ message(formError) }}</div></div><div class="drawer-footer"><button type="button" class="button secondary" @click="closeDrawer()">{{ t('取消') }}</button><button type="submit" data-testid="tunnel-save" class="button primary" :disabled="busy.save">{{ busy.save ? t("正在保存") : t("保存隧道") }}<Icon name="check" :size="16" /></button></div></form>
     </section></div></Transition>
 
-  <div v-if="credentialProfile" class="modal-backdrop" @click.self="credentialProfile = null"><form class="modal credential-modal" role="dialog" aria-modal="true" aria-labelledby="credential-title" @submit.prevent="submitCredentials"><div class="modal-top"><span class="modal-icon blue"><Icon name="key" :size="25" /></span><button class="icon-button" type="button" :aria-label="t('关闭认证')" @click="credentialProfile = null"><Icon name="close" :size="19" /></button></div><h2 id="credential-title">{{ t('连接') }} {{ credentialProfile.name }}</h2><p>{{ credentialProfile.username }}@{{ credentialProfile.host }}:{{ credentialProfile.port }}</p><label v-if="credentialProfile.authType === 'password'" class="field">{{ t('连接密码') }}<input v-model="credentialPassword" type="password" :placeholder="t('输入密码，或留空使用已记住的密码')" autocomplete="current-password" /></label><label v-else class="field">{{ t('密钥口令') }}<input v-model="credentialPassphrase" type="password" :placeholder="t('未加密私钥可留空')" autocomplete="current-password" /></label><label class="checkbox-row"><input v-model="credentialRemember" type="checkbox" /><span>{{ t('使用系统加密记住凭据') }}</span></label><div class="modal-actions"><button type="button" class="button secondary" @click="credentialProfile = null">{{ t('取消') }}</button><button type="submit" class="button primary"><Icon name="link" :size="16" />{{ t('连接') }}</button></div></form></div>
+  <div v-if="credentialProfile" class="modal-backdrop" @click.self="credentialProfile = null"><form class="modal credential-modal" role="dialog" aria-modal="true" aria-labelledby="credential-title" @submit.prevent="submitCredentials"><div class="modal-top"><span class="modal-icon blue"><Icon name="key" :size="25" /></span><button class="icon-button" type="button" :aria-label="t('关闭认证')" @click="credentialProfile = null"><Icon name="close" :size="19" /></button></div><h2 id="credential-title">{{ t('连接') }} {{ credentialProfile.name }}</h2><p>{{ credentialProfile.username }}@{{ credentialProfile.host }}:{{ credentialProfile.port }}</p><label v-if="credentialProfile.authType === 'password'" class="field">{{ t('连接密码') }}<input v-model="credentialPassword" type="password" :placeholder="t('输入密码，或留空使用已记住的密码')" autocomplete="current-password" /></label><label v-else class="field">{{ t('密钥口令') }}<input v-model="credentialPassphrase" type="password" :placeholder="t('未加密私钥可留空')" autocomplete="current-password" /></label><label class="checkbox-row"><input v-model="credentialRemember" type="checkbox" /><span>{{ t('使用系统加密记住凭据') }}</span></label><div v-for="(hop, index) in credentialProfile.jumpHosts || []" :key="hop.id" class="credential-hop"><strong>{{ t('跳板机 {n}', { n: index + 1 }) }} · {{ hop.username }}@{{ hop.host }}</strong><label class="field">{{ t(hop.authType === 'password' ? '连接密码' : '密钥口令') }}<input v-if="hop.authType === 'password'" v-model="credentialJumpSecrets[hop.id]!.password" type="password" :placeholder="t('输入密码，或留空使用已记住的密码')" autocomplete="current-password" /><input v-else v-model="credentialJumpSecrets[hop.id]!.passphrase" type="password" :placeholder="t('未加密私钥可留空')" autocomplete="current-password" /></label><label class="checkbox-row"><input v-model="credentialJumpSecrets[hop.id]!.remember" type="checkbox" /><span>{{ t('使用系统加密记住凭据') }}</span></label></div><div class="modal-actions"><button type="button" class="button secondary" @click="credentialProfile = null">{{ t('取消') }}</button><button type="submit" class="button primary"><Icon name="link" :size="16" />{{ t('连接') }}</button></div></form></div>
   <div v-if="deleting" class="modal-backdrop" @click.self="!busy.delete && (deleting = null)"><section class="modal confirm-modal" role="alertdialog" aria-modal="true" aria-labelledby="delete-title"><span class="modal-icon red"><Icon name="trash" :size="25" /></span><h2 id="delete-title">{{ t(deleting.kind === 'device' ? '移除设备？' : '移除隧道？') }}</h2><p>{{ t(deleting.kind === 'device' ? '「{name}」的连接会先关闭，然后移除设备配置。' : '「{name}」的转发会先停止，然后移除隧道配置。', { name: deleting.name }) }}</p><div class="modal-actions"><button class="button secondary" :disabled="busy.delete" @click="deleting = null">{{ t('取消') }}</button><button class="button danger" :disabled="busy.delete" @click="deleteConfirmed()">{{ busy.delete ? t("正在移除") : t("确认移除") }}</button></div></section></div>
   <div v-if="jobCancellation" class="modal-backdrop" @click.self="!busy.cancelJob && (jobCancellation = null)"><section class="modal confirm-modal" data-testid="job-cancel-confirmation" role="alertdialog" aria-modal="true" aria-labelledby="job-cancel-title"><span class="modal-icon red"><Icon name="trash" :size="25" /></span><h2 id="job-cancel-title">{{ t('删除自己的作业？') }}</h2><p>{{ t('将取消排队中的作业，或终止正在运行的作业。') }}</p><dl class="confirmation-details"><div><dt>{{ t('服务器') }}</dt><dd>{{ jobCancellation.profileName }}</dd></div><div><dt>{{ t('作业编号') }}</dt><dd>{{ jobCancellation.preview.jobId }}</dd></div><div><dt>{{ t('作业名称') }}</dt><dd>{{ jobCancellation.jobName || '—' }}</dd></div><div><dt>{{ t('所属用户') }}</dt><dd>{{ jobCancellation.preview.owner }}</dd></div></dl><div v-if="confirmationExpired" class="confirmation-warning" role="status">{{ t('确认已过期，请取消后重新检查作业。') }}</div><div class="modal-actions"><button class="button secondary" data-testid="job-cancel-dismiss" :disabled="busy.cancelJob" @click="jobCancellation = null">{{ t('取消') }}</button><button class="button danger" data-testid="job-cancel-approve" :disabled="busy.cancelJob || confirmationExpired" @click="cancelJobConfirmed()">{{ busy.cancelJob ? t("正在删除") : t("确认删除作业") }}</button></div></section></div>
   <div v-if="tmpCleanup" class="modal-backdrop" @click.self="!busy.cleanupTmp && (tmpCleanup = null)"><section class="modal confirm-modal cleanup-modal" data-testid="tmp-cleanup-confirmation" role="alertdialog" aria-modal="true" aria-labelledby="tmp-cleanup-title"><span class="modal-icon red"><Icon name="trash" :size="25" /></span><h2 id="tmp-cleanup-title">{{ t('清理自己的临时文件？') }}</h2><p>{{ t('将删除 /tmp 内属于你的文件及可移除的空目录，可能影响正在使用这些文件的程序。此操作无法撤销。') }}</p><dl class="confirmation-details"><div><dt>{{ t('服务器') }}</dt><dd>{{ tmpCleanup.profileName }}</dd></div><div><dt>{{ t('目录') }}</dt><dd>{{ tmpCleanup.preview.root }}</dd></div><div><dt>{{ t('所属用户') }}</dt><dd>{{ t('{user}（UID {uid}）', { user: tmpCleanup.preview.username, uid: tmpCleanup.preview.uid }) }}</dd></div><div><dt>{{ t('文件及链接') }}</dt><dd>{{ tmpCleanup.preview.fileCount.toLocaleString() }} {{ t('项') }}<small>{{ t('另清理可移除的本人空目录') }}</small></dd></div><div><dt>{{ t('我的空间占用') }}</dt><dd>{{ bytesText(tmpCleanup.preview.bytes) }}</dd></div></dl><div v-if="tmpCleanup.preview.warnings?.length" class="confirmation-warning"><div v-for="warning in tmpCleanup.preview.warnings" :key="warning">{{ message(warning) }}</div></div><div v-if="confirmationExpired" class="confirmation-warning" role="status">{{ t('确认已过期，请取消后重新统计文件。') }}</div><div class="modal-actions"><button class="button secondary" data-testid="tmp-cleanup-dismiss" :disabled="busy.cleanupTmp" @click="tmpCleanup = null">{{ t('取消') }}</button><button class="button danger" data-testid="tmp-cleanup-approve" :disabled="busy.cleanupTmp || confirmationExpired || !tmpCleanup.preview.fileCount" @click="cleanupTmpConfirmed()">{{ busy.cleanupTmp ? t("正在清理") : t("确认清理 /tmp") }}</button></div></section></div>
-  <div v-if="hostRequest" class="modal-backdrop host-backdrop"><section class="modal host-modal" role="alertdialog" aria-modal="true" aria-labelledby="host-title"><span class="modal-icon" :class="hostRequest.changed ? 'red' : 'blue'"><Icon :name="hostRequest.changed ? 'alert' : 'shield'" :size="28" /></span><h2 id="host-title">{{ hostRequest.changed ? t("服务器指纹已变化") : t("确认服务器身份") }}</h2><p>{{ hostRequest.changed ? t("当前服务器密钥与此前记录不同。请核对来源，确认服务器是否更换过密钥。") : t("首次连接这台设备，请与服务器管理员提供的指纹核对。确认后会记住此服务器身份。") }}</p><div class="fingerprint-box"><span>{{ hostRequest.host }}:{{ hostRequest.port }}<small>{{ hostRequest.keyType }}</small></span><code>{{ hostRequest.fingerprint }}</code></div><div class="modal-actions"><button class="button secondary" :disabled="busy.trust" @click="trustHost(false)">{{ t('取消连接') }}</button><button class="button" :class="hostRequest.changed ? 'danger' : 'primary'" data-testid="host-accept" :disabled="busy.trust" @click="trustHost(true)">{{ t('确认并信任') }}<Icon name="check" :size="16" /></button></div></section></div>
+  <div v-if="hostRequest" class="modal-backdrop host-backdrop"><section class="modal host-modal" role="alertdialog" aria-modal="true" aria-labelledby="host-title"><span class="modal-icon" :class="hostRequest.changed ? 'red' : 'blue'"><Icon :name="hostRequest.changed ? 'alert' : 'shield'" :size="28" /></span><h2 id="host-title">{{ hostRequest.changed ? t("服务器指纹已变化") : t("确认服务器身份") }}</h2><p>{{ hostRequest.changed ? t("当前服务器密钥与此前记录不同。请核对来源，确认服务器是否更换过密钥。") : t("首次连接这台设备，请与服务器管理员提供的指纹核对。确认后会记住此服务器身份。") }}</p><p v-if="hostRequest.endpointName">{{ hostRequest.isJumpHost ? t('跳板机 {n}', { n: (hostRequest.routeIndex || 0) + 1 }) : t('目标服务器') }} · {{ hostRequest.endpointName }}</p><div class="fingerprint-box"><span>{{ hostRequest.host }}:{{ hostRequest.port }}<small>{{ hostRequest.keyType }}</small></span><code>{{ hostRequest.fingerprint }}</code></div><div class="modal-actions"><button class="button secondary" :disabled="busy.trust" @click="trustHost(false)">{{ t('取消连接') }}</button><button class="button" :class="hostRequest.changed ? 'danger' : 'primary'" data-testid="host-accept" :disabled="busy.trust" @click="trustHost(true)">{{ t('确认并信任') }}<Icon name="check" :size="16" /></button></div></section></div>
   <div v-if="shutdown" class="shutdown-backdrop" data-testid="shutdown-overlay"><section class="shutdown-panel" role="status" aria-live="assertive"><span class="shutdown-spinner" aria-hidden="true" /><h2>{{ t('正在安全退出') }}</h2><p>{{ message(shutdown.message) }}</p><small>{{ t('连接关闭后，软件会自动退出') }}</small></section></div>
   <div class="toast-stack" :inert="Boolean(shutdown)" role="status" aria-live="polite"><TransitionGroup name="toast"><div v-for="notice in notices" :key="notice.id" class="toast" :class="{ error: notice.error }"><Icon :name="notice.error ? 'alert' : 'check'" :size="18" /><span>{{ noticeText(notice.message) }}</span><button class="icon-button" :aria-label="t('关闭通知')" @click="notices = notices.filter(n => n.id !== notice.id)"><Icon name="close" :size="15" /></button></div></TransitionGroup></div>
 </template>
 
 <style scoped>
+.connection-fields { min-width: 0; border: 0; padding: 0; margin: 22px 0 0; }
+.target-connection-test { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }.target-connection-test>span,.target-connection-test>small { color: var(--text-secondary); font-size: 11px; }
+.connection-test-result { margin: 0; color: var(--green); font-size: 12px; overflow-wrap: anywhere; }.connection-test-result.error { color: var(--red); }
+.credential-hop { padding-top: 14px; margin-top: 14px; border-top: 1px solid var(--surface-border); display: grid; gap: 12px; }.credential-hop>strong { color: var(--text-secondary); font-size: 12px; overflow-wrap: anywhere; }
+.credential-modal { max-height: 85vh; overflow-y: auto; }
+
 .language-control { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; color: var(--text-secondary); font-size: 11px; }
 .language-control select { min-width: 104px; max-width: 126px; padding: 6px 8px; color: var(--text); background: var(--surface-input); border: 1px solid var(--surface-border); border-radius: 8px; font: inherit; cursor: pointer; }
 .language-control select:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }

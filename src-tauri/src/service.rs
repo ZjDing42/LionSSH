@@ -1,3 +1,5 @@
+mod connection_test;
+
 use crate::{
     codex::CodexTool,
     locale, model,
@@ -31,6 +33,8 @@ pub const PUBLIC_METHODS: &[&str] = &[
     "save-profile",
     "delete-profile",
     "connect",
+    "test-connection",
+    "cancel-test-connection",
     "disconnect",
     "refresh-gpu",
     "prepare-gpu-process-stop",
@@ -167,6 +171,8 @@ pub struct Service {
     host_keys: Mutex<HashMap<String, Value>>,
     operations: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
     startup_restored: AsyncMutex<bool>,
+    connection_tests: Mutex<HashMap<String, connection_test::ConnectionTest>>,
+    cancelled_connection_tests: Mutex<Vec<(String, std::time::Instant)>>,
     terminals: TerminalManager,
     pub files: Arc<crate::files::FileManager>,
     theme: Mutex<String>,
@@ -191,6 +197,17 @@ fn clean_secrets(input: Option<&Value>) -> Reply {
     let mut result = json!({});
     if let Some(input) = input.filter(|v| !v.is_null()) {
         let object = input.as_object().ok_or("凭据格式不正确")?;
+        if let Some(hops) = object.get("jumpHosts").filter(|v| !v.is_null()) {
+            let hops = hops.as_object().ok_or("跳板机凭据格式不正确")?;
+            let mut clean = serde_json::Map::new();
+            for (id, secret) in hops {
+                if id.len() > 400 || !secret.is_object() || secret.get("jumpHosts").is_some() {
+                    return Err("跳板机凭据格式不正确".into());
+                }
+                clean.insert(id.clone(), clean_secrets(Some(secret))?);
+            }
+            result["jumpHosts"] = Value::Object(clean);
+        }
         for key in ["password", "passphrase"] {
             if let Some(value) = object.get(key) {
                 let value = value.as_str().ok_or("凭据格式不正确")?;
@@ -208,7 +225,21 @@ fn clean_secrets(input: Option<&Value>) -> Reply {
 fn merge(target: &mut Value, values: &Value) {
     if let (Some(target), Some(values)) = (target.as_object_mut(), values.as_object()) {
         for (key, value) in values {
-            target.insert(key.clone(), value.clone());
+            if key == "jumpHosts" {
+                if let (Some(target), Some(hops)) = (
+                    target
+                        .entry(key.clone())
+                        .or_insert(json!({}))
+                        .as_object_mut(),
+                    value.as_object(),
+                ) {
+                    for (id, secret) in hops {
+                        merge(target.entry(id.clone()).or_insert(json!({})), secret);
+                    }
+                }
+            } else {
+                target.insert(key.clone(), value.clone());
+            }
         }
     }
 }
@@ -258,6 +289,8 @@ impl Service {
             host_keys: Mutex::new(HashMap::new()),
             operations: Mutex::new(HashMap::new()),
             startup_restored: AsyncMutex::new(false),
+            connection_tests: Mutex::new(HashMap::new()),
+            cancelled_connection_tests: Mutex::new(Vec::new()),
             terminals: TerminalManager::new(),
             files: crate::files::FileManager::new(),
             theme: Mutex::new(resolved.into()),
@@ -547,14 +580,7 @@ impl Service {
         while self.current(&device) && !device.cancel.is_cancelled() {
             let profile = device.profile.lock().unwrap().clone();
             let secrets = device.secrets.lock().unwrap().clone();
-            let trusted = {
-                let store = self.store.lock().await;
-                store
-                    .as_ref()
-                    .unwrap()
-                    .fingerprints(&profile)
-                    .unwrap_or_default()
-            };
+            let trusted = self.route_fingerprints(&profile).await;
             let (sender, receiver) = ssh::trust_channel();
             *device.trust.lock().unwrap() = Some(sender);
             self.status(
@@ -566,7 +592,7 @@ impl Service {
                 },
                 None,
             );
-            let connection = tokio::select! { _ = device.cancel.cancelled() => break, result = Connection::connect(profile.clone(),secrets,trusted,self.sink_for(&device),receiver) => result };
+            let connection = tokio::select! { _ = device.cancel.cancelled() => break, result = Connection::connect_route(profile.clone(),secrets,trusted,self.sink_for(&device),receiver) => result };
             let failure = match connection {
                 Ok(connection) => {
                     let remembered = {
@@ -742,6 +768,16 @@ impl Service {
         Ok(device)
     }
     async fn credentials(&self, profile: &Value, supplied: Option<&Value>) -> Reply {
+        self.route_credentials(profile, supplied, None, true).await
+    }
+
+    async fn route_credentials(
+        &self,
+        profile: &Value,
+        supplied: Option<&Value>,
+        target_hop: Option<&str>,
+        cache_result: bool,
+    ) -> Reply {
         let supplied = clean_secrets(supplied)?;
         let id = profile["id"].as_str().unwrap();
         let cached = self
@@ -751,40 +787,105 @@ impl Service {
             .get(id)
             .cloned()
             .unwrap_or(json!({}));
-        let saved = {
+        let (saved_profile, saved) = {
             let guard = self.store.lock().await;
-            guard.as_ref().unwrap().read_secret(id)
+            let store = guard.as_ref().unwrap();
+            (store.get(id).ok(), store.read_secret(id))
         };
-        let relevant = if profile["authType"] == "password" {
-            "password"
-        } else {
-            "passphrase"
-        };
-        let mut result = match saved {
-            Ok(value) => value,
-            Err(error)
-                if supplied[relevant].as_str().unwrap_or("").is_empty()
-                    && cached[relevant].as_str().unwrap_or("").is_empty() =>
-            {
-                return Err(error)
+        let mut result = json!({});
+        for (index, endpoint) in model::connection_endpoints(profile).iter().enumerate() {
+            let is_target = index == model::jump_hosts(profile).len();
+            let credential_hop = if is_target {
+                target_hop
+            } else {
+                endpoint["id"].as_str()
+            };
+            let select = |value: &Value| {
+                credential_hop.map_or_else(|| value.clone(), |hop| value["jumpHosts"][hop].clone())
+            };
+            let old_endpoint = saved_profile.as_ref().and_then(|p| {
+                credential_hop.map_or(Some(p), |hop| {
+                    model::jump_hosts(p).iter().find(|h| h["id"] == hop)
+                })
+            });
+            let reusable = old_endpoint.is_some_and(|old| model::same_login(old, endpoint));
+            let cached = if reusable { select(&cached) } else { json!({}) };
+            let supplied = select(&supplied);
+            let relevant = if endpoint["authType"] == "password" {
+                "password"
+            } else {
+                "passphrase"
+            };
+            let mut credential = if reusable {
+                match &saved {
+                    Ok(saved) => select(saved),
+                    Err(error)
+                        if supplied[relevant].as_str().unwrap_or("").is_empty()
+                            && cached[relevant].as_str().unwrap_or("").is_empty() =>
+                    {
+                        return Err(error.clone())
+                    }
+                    Err(_) => json!({}),
+                }
+            } else {
+                json!({})
+            };
+            if !credential.is_object() {
+                credential = json!({});
             }
-            Err(_) => json!({}),
-        };
-        merge(&mut result, &cached);
-        merge(&mut result, &supplied);
-        if relevant == "password" && result["password"].as_str().unwrap_or("").is_empty() {
-            return Err("请先输入 SSH 密码".into());
+            merge(&mut credential, &cached);
+            merge(&mut credential, &supplied);
+            credential.as_object_mut().unwrap().remove("jumpHosts");
+            let error = if relevant == "password"
+                && credential["password"].as_str().unwrap_or("").is_empty()
+            {
+                Some("请先输入 SSH 密码")
+            } else if endpoint["authType"] == "key"
+                && !Path::new(endpoint["keyPath"].as_str().unwrap_or("")).is_file()
+            {
+                Some("密钥文件不存在或无法读取，请检查路径")
+            } else {
+                None
+            };
+            if let Some(error) = error {
+                return Err(
+                    if model::jump_hosts(profile).is_empty() && target_hop.is_none() {
+                        error.to_owned()
+                    } else {
+                        format!("{}：{error}", model::endpoint_label(profile, index))
+                    },
+                );
+            }
+            if is_target {
+                merge(&mut result, &credential);
+            } else {
+                if result["jumpHosts"].is_null() {
+                    result["jumpHosts"] = json!({});
+                }
+                result["jumpHosts"][endpoint["id"].as_str().unwrap()] = credential;
+            }
         }
-        if profile["authType"] == "key"
-            && !Path::new(profile["keyPath"].as_str().unwrap_or("")).is_file()
-        {
-            return Err("密钥文件不存在或无法读取，请检查路径".into());
+        if cache_result {
+            self.secrets
+                .lock()
+                .unwrap()
+                .insert(id.into(), result.clone());
         }
-        self.secrets
-            .lock()
-            .unwrap()
-            .insert(id.into(), result.clone());
         Ok(result)
+    }
+
+    async fn route_fingerprints(&self, profile: &Value) -> Vec<Vec<String>> {
+        let store = self.store.lock().await;
+        model::connection_endpoints(profile)
+            .iter()
+            .map(|endpoint| {
+                store
+                    .as_ref()
+                    .unwrap()
+                    .fingerprints(endpoint)
+                    .unwrap_or_default()
+            })
+            .collect()
     }
     async fn theme_state(&self) -> Value {
         let preference = self
@@ -846,6 +947,17 @@ impl Service {
             return Err("调用参数格式不正确".into());
         }
         self.ensure_store().await?;
+        if method == "test-connection" {
+            return self.test_connection(&args).await;
+        }
+        if method == "cancel-test-connection" {
+            let id = string_argument(&args, 0, "测试标识")?;
+            self.cancel_connection_test(id)?;
+            return Ok(Value::Null);
+        }
+        if method == "trust-host" {
+            return self.trust_connection_host(&args).await;
+        }
         if method == "initial" {
             self.restore_connections().await;
             let profiles = self.store.lock().await.as_ref().unwrap().public_profiles();
@@ -912,9 +1024,16 @@ impl Service {
             }
             let old = self.profile(&id).await.ok();
             let changed = old.as_ref().is_some_and(|old| {
-                ["host", "port", "username", "authType", "keyPath"]
-                    .iter()
-                    .any(|key| old[key] != input[key])
+                [
+                    "host",
+                    "port",
+                    "username",
+                    "authType",
+                    "keyPath",
+                    "jumpHosts",
+                ]
+                .iter()
+                .any(|key| old[key] != input[key])
             });
             let endpoint_changed = old.as_ref().is_some_and(|old| {
                 ["host", "port", "username"]
@@ -924,7 +1043,6 @@ impl Service {
             if changed {
                 self.forget_connection(&id).await?;
                 self.disconnect(&id).await?;
-                self.secrets.lock().unwrap().remove(&id);
             }
             let result = self
                 .store
@@ -934,8 +1052,31 @@ impl Service {
                 .unwrap()
                 .save(&input, supplied)?;
             let profile = self.profile(&id).await?;
-            if supplied.is_some() {
+            if changed || supplied.is_some() {
                 let mut cache = self.secrets.lock().unwrap();
+                if changed {
+                    let previous = cache.remove(&id).unwrap_or(json!({}));
+                    let mut retained = json!({});
+                    if let Some(old) = old.as_ref() {
+                        if model::same_login(old, &profile) {
+                            retained = previous.clone();
+                            retained.as_object_mut().unwrap().remove("jumpHosts");
+                        }
+                        for hop in model::jump_hosts(&profile) {
+                            let key = hop["id"].as_str().unwrap();
+                            if model::jump_hosts(old).iter().any(|prior| {
+                                prior["id"] == hop["id"] && model::same_login(prior, hop)
+                            }) && previous["jumpHosts"][key].is_object()
+                            {
+                                if retained["jumpHosts"].is_null() {
+                                    retained["jumpHosts"] = json!({});
+                                }
+                                retained["jumpHosts"][key] = previous["jumpHosts"][key].clone();
+                            }
+                        }
+                    }
+                    cache.insert(id.clone(), retained);
+                }
                 merge(cache.entry(id.clone()).or_insert(json!({})), &clean);
             }
             let device = self.devices.lock().unwrap().get(&id).cloned();
@@ -960,7 +1101,7 @@ impl Service {
             return Ok(result);
         }
         let id = string_argument(&args, 0, "设备标识")?.to_string();
-        let profile = self.profile(&id).await?;
+        self.profile(&id).await?;
         if method.starts_with("terminal-") {
             let expected = match method {
                 "terminal-list" => 1,
@@ -1093,52 +1234,6 @@ impl Service {
                 }
                 return Ok(Value::Null);
             }
-            "trust-host" => {
-                let fingerprint = string_argument(&args, 2, "主机指纹")?;
-                let accepted = argument(&args, 1, "确认结果")?
-                    .as_bool()
-                    .ok_or("确认结果格式不正确")?;
-                let request = self
-                    .host_keys
-                    .lock()
-                    .unwrap()
-                    .get(&id)
-                    .cloned()
-                    .ok_or("主机指纹请求已过期")?;
-                if request["fingerprint"] != fingerprint {
-                    return Err("主机指纹请求已过期".into());
-                }
-                let device = self
-                    .devices
-                    .lock()
-                    .unwrap()
-                    .get(&id)
-                    .cloned()
-                    .ok_or("连接已关闭")?;
-                let sender = device
-                    .trust
-                    .lock()
-                    .unwrap()
-                    .clone()
-                    .ok_or("主机指纹请求已过期")?;
-                if accepted {
-                    self.store
-                        .lock()
-                        .await
-                        .as_mut()
-                        .unwrap()
-                        .trust(&profile, fingerprint)?;
-                }
-                sender
-                    .send(HostDecision {
-                        fingerprint: fingerprint.into(),
-                        accepted,
-                    })
-                    .map_err(|_| "主机指纹请求已过期")?;
-                self.host_keys.lock().unwrap().remove(&id);
-                self.status(&id, "connecting", None);
-                return Ok(Value::Null);
-            }
             _ => {}
         }
         let lock = self
@@ -1264,6 +1359,9 @@ impl Service {
     }
     pub async fn shutdown(&self) {
         self.quitting.store(true, Ordering::SeqCst);
+        for test in self.connection_tests.lock().unwrap().values() {
+            test.cancel.cancel();
+        }
         self.files.stop();
         self.terminals.shutdown().await;
         (self.sink)(
@@ -1277,6 +1375,9 @@ impl Service {
         self.secrets.lock().unwrap().clear();
     }
     pub fn kill(&self) {
+        for test in self.connection_tests.lock().unwrap().values() {
+            test.cancel.cancel();
+        }
         self.terminals.kill();
         for (_, device) in self.devices.lock().unwrap().drain() {
             device.desired.store(false, Ordering::SeqCst);

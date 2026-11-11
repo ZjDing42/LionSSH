@@ -18,7 +18,7 @@ export interface Tunnel {
   healthIntervalSec: number;
 }
 
-export interface Profile {
+export interface JumpHost {
   id: string;
   name: string;
   host: string;
@@ -26,8 +26,12 @@ export interface Profile {
   username: string;
   authType: 'key' | 'password';
   keyPath: string;
-  autoReconnect: boolean;
   hasSavedSecret?: boolean;
+}
+
+export interface Profile extends JumpHost {
+  autoReconnect: boolean;
+  jumpHosts?: JumpHost[];
   gpu: GpuSettings;
   tunnels: Tunnel[];
 }
@@ -192,9 +196,15 @@ export interface HostKeyRequest {
   host: string;
   port: number;
   changed: boolean;
+  routeIndex?: number;
+  endpointName?: string;
+  isJumpHost?: boolean;
+  connectionTest?: boolean;
 }
 
-export interface Secrets { password?: string; passphrase?: string; remember?: boolean }
+export interface LoginSecret { password?: string; passphrase?: string; remember?: boolean }
+export interface Secrets extends LoginSecret { jumpHosts?: Record<string, LoginSecret> }
+export interface ConnectionTestResult { ok: boolean; elapsedMs: number; host: string; port: number; hops: number }
 
 export type ThemePreference = 'light' | 'dark' | 'system';
 export interface ThemeState { preference: ThemePreference; resolved: 'light' | 'dark' }
@@ -241,6 +251,8 @@ export interface LionApi {
   saveProfile(profile: Profile, secrets?: Secrets): Promise<Profile>;
   deleteProfile(id: string): Promise<void>;
   connect(id: string, secrets?: Secrets): Promise<void>;
+  testConnection(id: string, profile: Profile, secrets?: Secrets, throughHopId?: string): Promise<ConnectionTestResult>;
+  cancelTestConnection(id: string): Promise<void>;
   disconnect(id: string): Promise<void>;
   refreshGpu(id: string): Promise<void>;
   prepareGpuProcessStop(id: string, gpuUuid: string, pid: number): Promise<GpuProcessStopPreview>;

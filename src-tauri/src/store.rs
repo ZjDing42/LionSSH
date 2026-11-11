@@ -125,10 +125,41 @@ impl Store {
             .iter()
             .map(|profile| {
                 let mut profile = profile.clone();
-                profile["hasSavedSecret"] = json!(self
-                    .secrets
-                    .get(profile["id"].as_str().unwrap_or(""))
-                    .is_some_and(model::truthy));
+                // Keep direct profiles on the existing metadata-only path: merely
+                // opening the device list must not access their system keyring.
+                if model::jump_hosts(&profile).is_empty() {
+                    profile["hasSavedSecret"] = json!(self
+                        .secrets
+                        .get(profile["id"].as_str().unwrap_or(""))
+                        .is_some_and(model::truthy));
+                    return profile;
+                }
+                let saved = self.read_secret(profile["id"].as_str().unwrap_or(""));
+                let relevant = if profile["authType"] == "password" {
+                    "password"
+                } else {
+                    "passphrase"
+                };
+                // An unreadable legacy secret still exists. Keep its marker so the
+                // connection reports the decryption error instead of silently replacing it.
+                profile["hasSavedSecret"] =
+                    json!(saved.as_ref().map_or(true, |saved| saved[relevant]
+                        .as_str()
+                        .is_some_and(|s| !s.is_empty())));
+                let saved = saved.unwrap_or(json!({}));
+                if let Some(hops) = profile["jumpHosts"].as_array_mut() {
+                    for hop in hops {
+                        let relevant = if hop["authType"] == "password" {
+                            "password"
+                        } else {
+                            "passphrase"
+                        };
+                        hop["hasSavedSecret"] = json!(saved["jumpHosts"]
+                            [hop["id"].as_str().unwrap_or("")][relevant]
+                            .as_str()
+                            .is_some_and(|s| !s.is_empty()));
+                    }
+                }
                 profile
             })
             .collect()
@@ -147,63 +178,126 @@ impl Store {
         let id = profile["id"].as_str().unwrap().to_owned();
         let previous_profiles = self.profiles.clone();
         let previous_secrets = self.secrets.clone();
-        // Encrypt first; a crypto failure must not mutate any in-memory setting.
-        let secret_update = if let Some(remember) =
-            secret.and_then(|secret| secret["remember"].as_bool())
-        {
-            if remember {
-                let secret = secret.unwrap();
-                let relevant = if profile["authType"] == "password" {
+        // Stage all remembered hop/target credentials together before changing memory or disk.
+        let old = self.profiles.iter().find(|p| p["id"] == id);
+        let same_logins = old.is_some_and(|old| {
+            model::same_login(old, &profile)
+                && model::jump_hosts(old).len() == model::jump_hosts(&profile).len()
+                && model::jump_hosts(&profile).iter().all(|hop| {
+                    model::jump_hosts(old)
+                        .iter()
+                        .any(|prior| prior["id"] == hop["id"] && model::same_login(prior, hop))
+                })
+        });
+        let credential_edit = secret.is_some_and(|secret| {
+            secret["remember"].is_boolean()
+                || secret["jumpHosts"]
+                    .as_object()
+                    .is_some_and(|hops| hops.values().any(|hop| hop["remember"].is_boolean()))
+        });
+        // Retain the encrypted bundle when only names, order, monitors or tunnels
+        // change; these changes do not need to rewrite stored credentials.
+        if !same_logins || credential_edit {
+            let saved = self.read_secret(&id).or_else(|error| {
+                let replaces_all = model::connection_endpoints(&profile)
+                    .iter()
+                    .enumerate()
+                    .all(|(index, endpoint)| {
+                        let supplied = if index == model::jump_hosts(&profile).len() {
+                            secret
+                        } else {
+                            secret
+                                .and_then(|v| v["jumpHosts"].get(endpoint["id"].as_str().unwrap()))
+                        };
+                        let relevant = if endpoint["authType"] == "password" {
+                            "password"
+                        } else {
+                            "passphrase"
+                        };
+                        supplied.is_some_and(|v| {
+                            v["remember"] == false
+                                || v[relevant].as_str().is_some_and(|s| !s.is_empty())
+                        })
+                    });
+                if replaces_all {
+                    Ok(json!({}))
+                } else {
+                    Err(error)
+                }
+            })?;
+            let mut remembered = json!({});
+            for (index, endpoint) in model::connection_endpoints(&profile).iter().enumerate() {
+                let is_target = index == model::jump_hosts(&profile).len();
+                let hop_id = endpoint["id"].as_str().unwrap_or("");
+                let previous_endpoint = old.and_then(|p| {
+                    if is_target {
+                        Some(p)
+                    } else {
+                        model::jump_hosts(p).iter().find(|h| h["id"] == hop_id)
+                    }
+                });
+                let previous = if previous_endpoint.is_some_and(|p| model::same_login(p, endpoint))
+                {
+                    if is_target {
+                        saved.clone()
+                    } else {
+                        saved["jumpHosts"][hop_id].clone()
+                    }
+                } else {
+                    json!({})
+                };
+                let input = if is_target {
+                    secret
+                } else {
+                    secret.and_then(|s| s["jumpHosts"].get(hop_id))
+                };
+                let relevant = if endpoint["authType"] == "password" {
                     "password"
                 } else {
                     "passphrase"
                 };
-                if secret
-                    .get(relevant)
-                    .is_some_and(|value| !value.is_null() && !value.is_string())
-                {
-                    return Err("凭据格式不正确".into());
-                }
-                let supplied = secret[relevant].as_str().filter(|value| !value.is_empty());
-                let existing =
-                    if supplied.is_none() && self.secrets.get(&id).is_some_and(model::truthy) {
-                        self.read_secret(&id)?
-                    } else {
-                        json!({})
-                    };
-                let plain = supplied.or_else(|| {
-                    existing[relevant]
-                        .as_str()
-                        .filter(|value| !value.is_empty())
-                });
-                if let Some(plain) = plain {
-                    if plain.encode_utf16().count() > 4096 {
-                        return Err("凭据格式不正确".into());
-                    }
-                    let mut data = Map::new();
-                    data.insert(relevant.into(), json!(plain));
-                    let encoded = crypto::transform("encrypt", &Value::Object(data).to_string())?;
-                    if encoded.is_empty() {
-                        return Err("系统加密未返回有效凭据".into());
-                    }
-                    Some(Some(json!(format!("{SECRET_PREFIX}{encoded}"))))
+                let plain = if input.is_some_and(|s| s["remember"] == false) {
+                    None
                 } else {
-                    Some(None)
+                    if let Some(value) =
+                        input.and_then(|s| s.get(relevant)).filter(|v| !v.is_null())
+                    {
+                        if !value.is_string()
+                            || value.as_str().unwrap().encode_utf16().count() > 4096
+                        {
+                            return Err("凭据格式不正确".into());
+                        }
+                    }
+                    let replacement = input
+                        .filter(|s| s["remember"] == true)
+                        .and_then(|s| s[relevant].as_str())
+                        .filter(|s| !s.is_empty());
+                    replacement.or_else(|| previous[relevant].as_str().filter(|s| !s.is_empty()))
+                };
+                if let Some(plain) = plain {
+                    if is_target {
+                        remembered[relevant] = json!(plain);
+                    } else {
+                        if remembered["jumpHosts"].is_null() {
+                            remembered["jumpHosts"] = json!({});
+                        }
+                        remembered["jumpHosts"][hop_id] = json!({relevant: plain});
+                    }
                 }
-            } else {
-                Some(None)
             }
-        } else {
-            None
-        };
-        if let Some(update) = secret_update {
-            match update {
-                Some(value) => {
-                    self.secrets.insert(id.clone(), value);
+            let encoded = if remembered.as_object().unwrap().is_empty() {
+                None
+            } else {
+                let encrypted = crypto::transform("encrypt", &remembered.to_string())?;
+                if encrypted.is_empty() {
+                    return Err("系统加密未返回有效凭据".into());
                 }
-                None => {
-                    self.secrets.remove(&id);
-                }
+                Some(json!(format!("{SECRET_PREFIX}{encrypted}")))
+            };
+            if let Some(encoded) = encoded {
+                self.secrets.insert(id.clone(), encoded);
+            } else {
+                self.secrets.remove(&id);
             }
         }
         if let Some(index) = self.profiles.iter().position(|value| value["id"] == id) {
