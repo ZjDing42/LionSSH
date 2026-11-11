@@ -28,7 +28,6 @@ function releaseArtifacts(version) {
     { key: 'windows-x86_64', file: `${prefix}-windows-x64-setup.exe`, alias: 'windows-x86_64-nsis' },
     { key: 'windows-x86_64-portable', file: `${prefix}-windows-x64-portable.zip` },
     { key: 'darwin-aarch64', file: `${prefix}-macos-aarch64.app.tar.gz`, alias: 'darwin-aarch64-app' },
-    { key: 'darwin-x86_64', file: `${prefix}-macos-x86_64.app.tar.gz`, alias: 'darwin-x86_64-app' },
     { key: 'linux-x86_64', file: `${prefix}-linux-x86_64.AppImage`, alias: 'linux-x86_64-appimage' },
   ];
 }
@@ -36,7 +35,6 @@ function requiredAssets(version) {
   return [
     ...releaseArtifacts(version).flatMap(artifact => [artifact.file, `${artifact.file}.sig`]),
     `Lion-SSH-${version}-macos-aarch64.dmg`,
-    `Lion-SSH-${version}-macos-x86_64.dmg`,
   ];
 }
 function signatureVersion(signature, version) {

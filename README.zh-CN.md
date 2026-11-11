@@ -89,18 +89,19 @@
 | --- | --- |
 | Windows x64 | 多文件便携 ZIP / 安装包 EXE |
 | macOS Apple Silicon | DMG |
-| macOS Intel | DMG |
 | Linux x86_64 | AppImage |
+
+从 v1.12.0 之后的版本开始，macOS 仅提供 Apple Silicon（M 系列）发行包。Intel（x86_64）Mac 的最后支持版本为 [v1.12.0](https://github.com/ZjDing42/LionSSH/releases/tag/v1.12.0)。
 
 Windows 需要 [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)，安装包会在缺少时下载；默认安装到 `%LOCALAPPDATA%\Programs\Lion SSH`，可手动更改。
 
-macOS 发行包使用完整应用包临时签名，CI 会检查构建应用、DMG 和更新归档中的签名，并在 Apple Silicon、Intel 运行器上检查打包应用实际启动；检查失败不会发布为 Latest。目前尚未使用 Developer ID 签名或通过 Apple 公证。复制到“应用程序”后，若系统拦截且你信任下载来源，可能需要在 **系统设置 → 隐私与安全性 → 仍要打开** 中允许运行，详见 [Apple 操作说明](https://support.apple.com/zh-cn/102445)。
+macOS 发行包使用完整应用包临时签名，CI 会检查构建应用、DMG 和更新归档中的签名，并在 Apple Silicon 运行器上检查打包应用实际启动；检查失败不会发布为 Latest。目前尚未使用 Developer ID 签名或通过 Apple 公证。复制到“应用程序”后，若系统拦截且你信任下载来源，可能需要在 **系统设置 → 隐私与安全性 → 仍要打开** 中允许运行，详见 [Apple 操作说明](https://support.apple.com/zh-cn/102445)。
 
 ## 数据
 
 Windows 安装版与便携版都使用主程序旁的 `data/`，保留原有 JSON 数据格式；macOS / Linux 使用系统用户数据目录，也可通过 `LION_DATA_DIR` 指定。已保存凭据绑定当前系统账户和安全存储。
 
-## 开发与打包
+## 开发与编译
 
 基于 **Tauri 2 + Rust + Vue 3 + TypeScript**，发行包无需 Node.js。开发需要 Node.js **22.12+**、Rust **1.90+**，以及 [Tauri 前置依赖](https://v2.tauri.app/zh-cn/start/prerequisites/)。
 
@@ -110,7 +111,7 @@ npm start
 npm run dist:win
 ```
 
-Windows 打包产物位于 `release/`，包含便携 ZIP 和安装包 EXE；正式打包需配置 [Tauri 更新签名](https://v2.tauri.app/plugin/updater/)。
+Windows 编译产物位于 `release/`，包含便携 ZIP 和安装包 EXE；正式编译需配置 [Tauri 更新签名](https://v2.tauri.app/plugin/updater/)。
 
 ## 开源许可
 

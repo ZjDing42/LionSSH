@@ -89,18 +89,19 @@ Tool panels use the available window width with fixed side margins. Personal sto
 | --- | --- |
 | Windows x64 | Multi-file portable ZIP / EXE installer |
 | macOS Apple Silicon | DMG |
-| macOS Intel | DMG |
 | Linux x86_64 | AppImage |
+
+Starting with releases after v1.12.0, macOS packages are available only for Apple Silicon (M-series) Macs. [v1.12.0](https://github.com/ZjDing42/LionSSH/releases/tag/v1.12.0) is the final supported release for Intel (x86_64) Macs.
 
 Windows requires [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/); the installer downloads it if missing. The default installation directory is `%LOCALAPPDATA%\Programs\Lion SSH`, and you can choose another location.
 
-macOS packages use a full ad-hoc application signature. CI verifies the built app, the DMG and the updater archive, then checks packaged-app startup on Apple Silicon and Intel runners. Failed checks prevent publication as Latest. Packages are not Developer ID signed or notarized by Apple. After copying the app to Applications, you may need to allow it in **System Settings → Privacy & Security → Open Anyway** if you trust the download. See [Apple's instructions](https://support.apple.com/en-us/102445).
+macOS packages use a full ad-hoc application signature. CI verifies the built app, the DMG and the updater archive, then checks packaged-app startup on an Apple Silicon runner. Failed checks prevent publication as Latest. Packages are not Developer ID signed or notarized by Apple. After copying the app to Applications, you may need to allow it in **System Settings → Privacy & Security → Open Anyway** if you trust the download. See [Apple's instructions](https://support.apple.com/en-us/102445).
 
 ## Data
 
 Both Windows editions use `data/` beside the executable and retain the existing JSON formats. macOS and Linux use system user data directories; `LION_DATA_DIR` can override the location. Saved credentials are bound to the current system account and secure store.
 
-## Development and packaging
+## Development and building
 
 Built with **Tauri 2 + Rust + Vue 3 + TypeScript**. Release packages do not need Node.js. Development requires Node.js **22.12+**, Rust **1.90+**, and the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/).
 
@@ -110,7 +111,7 @@ npm start
 npm run dist:win
 ```
 
-Windows packages are written to `release/` as a portable ZIP and an EXE installer. Release packaging requires [Tauri update signing](https://v2.tauri.app/plugin/updater/).
+Windows build artifacts are written to `release/` and include a portable ZIP and an EXE installer. Release builds require [Tauri update signing](https://v2.tauri.app/plugin/updater/).
 
 ## License
 

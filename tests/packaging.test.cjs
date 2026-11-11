@@ -74,20 +74,24 @@ function encodedSignature(version, extra = '') {
   return Buffer.from(`untrusted comment: fixture signature\nRWFAKE\ntrusted comment: timestamp:123\tfile:fixture.zip\tversion:${version}${extra}\nGLOBAL\n`).toString('base64');
 }
 
-test('release metadata covers native platforms and the separately signed portable ZIP', async () => {
-  const version = '1.7.0';
+test('future releases cover supported platforms without requiring or advertising macOS Intel', async () => {
+  const version = '1.12.1';
   const assets = requiredAssets(version).map((name, index) => ({ id: index + 1, name, size: name.endsWith('.sig') ? 200 : 4096 }));
-  const metadata = await makeUpdaterJson({ version, tag: 'v1.7.0', repository: 'ZjDing989/LionSSH', assets,
+  assert.equal(assets.length, 9);
+  assert.ok(assets.every(asset => !asset.name.includes('macos-x86_64')));
+  const metadata = await makeUpdaterJson({ version, tag: `v${version}`, repository: 'ZjDing989/LionSSH', assets,
     publishedAt: '2026-10-15T08:00:00Z', readSignature: async () => encodedSignature(version) });
   assert.equal(metadata.version, version);
-  for (const target of ['windows-x86_64', 'windows-x86_64-portable', 'darwin-aarch64', 'darwin-x86_64', 'linux-x86_64']) {
-    assert.ok(metadata.platforms[target].url.startsWith('https://github.com/ZjDing989/LionSSH/releases/download/v1.7.0/'));
+  for (const target of ['windows-x86_64', 'windows-x86_64-portable', 'darwin-aarch64', 'linux-x86_64']) {
+    assert.ok(metadata.platforms[target].url.startsWith(`https://github.com/ZjDing989/LionSSH/releases/download/v${version}/`));
     assert.equal(metadata.platforms[target].signature, encodedSignature(version));
   }
   assert.ok(metadata.platforms['windows-x86_64'].url.endsWith('-setup.exe'));
   assert.ok(metadata.platforms['windows-x86_64-portable'].url.endsWith('-portable.zip'));
   assert.ok(metadata.platforms['darwin-aarch64'].url.endsWith('-macos-aarch64.app.tar.gz'));
-  assert.ok(metadata.platforms['darwin-x86_64'].url.endsWith('-macos-x86_64.app.tar.gz'));
+  assert.equal(metadata.platforms['darwin-x86_64'], undefined);
+  assert.equal(metadata.platforms['darwin-x86_64-app'], undefined);
+  assert.equal(Object.keys(metadata.platforms).length, 7);
   assert.ok(metadata.platforms['linux-x86_64'].url.endsWith('-linux-x86_64.AppImage'));
   assert.deepEqual(metadata.platforms['windows-x86_64-nsis'], metadata.platforms['windows-x86_64']);
 });
@@ -116,7 +120,7 @@ test('release finalization rejects missing architectures, empty assets and misma
   assert.throws(() => signatureVersion(encodedSignature(version, '\tversion:1.6.2'), version), /bound/);
   assert.throws(() => signatureVersion(Buffer.from('untrusted comment: version:1.7.0\nFAKE').toString('base64'), version), /trusted comment/);
   assert.throws(() => signatureVersion('https://example.com/signature.sig', version), /encoding/);
-  assert.equal(releaseArtifacts(version).length, 5);
+  assert.equal(releaseArtifacts(version).length, 4);
 });
 
 test('release preflight requires one version/tag and an updater public key before publishing', async () => {
