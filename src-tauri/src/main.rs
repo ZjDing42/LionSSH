@@ -5,6 +5,7 @@ mod crypto;
 mod file_drag;
 mod file_drop;
 mod files;
+mod gpu_process;
 mod locale;
 mod model;
 mod monitor;

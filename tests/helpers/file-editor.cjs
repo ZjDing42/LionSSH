@@ -70,8 +70,9 @@ async function verifyFileEditor(page, output) {
   await panel.getByRole('button', { name: '关闭', exact: true }).click();
   for (const width of [900, 1450, 1920, 2560]) {
     await page.setViewportSize({ width, height: 980 });
-    const bounds = await page.locator('.workspace').evaluate(e => ({ right: e.getBoundingClientRect().right, width: e.getBoundingClientRect().width, viewport: document.documentElement.clientWidth, overflow: document.documentElement.scrollWidth > innerWidth, leftPadding: getComputedStyle(e).paddingLeft, rightPadding: getComputedStyle(e).paddingRight }));
-    assert.equal(bounds.right, bounds.viewport); assert.equal(bounds.overflow, false);
+    // A stable scrollbar gutter belongs to the viewport, outside the body content.
+    const bounds = await page.locator('.workspace').evaluate(e => ({ right: e.getBoundingClientRect().right, width: e.getBoundingClientRect().width, contentRight: document.body.getBoundingClientRect().right, overflow: document.documentElement.scrollWidth > innerWidth, leftPadding: getComputedStyle(e).paddingLeft, rightPadding: getComputedStyle(e).paddingRight }));
+    assert.equal(bounds.right, bounds.contentRight); assert.equal(bounds.overflow, false);
     assert.equal(bounds.leftPadding, '44px'); assert.equal(bounds.rightPadding, '44px');
     if (width > 1900) assert.ok(bounds.width > 1440);
   }

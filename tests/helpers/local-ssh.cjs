@@ -214,6 +214,13 @@ async function localSshServer(options = {}) {
         });
         session.on('exec', (acceptExec, reject, info) => {
           stats.allCommands.push(info.command);
+          // Read-only GPU process replies are opt-in; commands are never executed.
+          if (options.gpuProcessResponse && info.command.startsWith('# Lion GPU process query v1\n')) {
+            const stream = acceptExec();
+            stream.on('error', () => {});
+            writeResponse(stream, options.gpuProcessResponse(info.command, stats));
+            return;
+          }
           if (info.command.startsWith('# Lion ')) {
             if (!allowedStorageCommands.has(info.command)) {
               stats.rejectedCommands.push(info.command);

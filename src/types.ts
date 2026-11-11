@@ -32,6 +32,24 @@ export interface Profile {
   tunnels: Tunnel[];
 }
 
+export interface GpuProcess {
+  pid: number;
+  name: string;
+  type?: string;
+  memoryUsedMiB?: number | null;
+  username?: string;
+  uid?: number;
+  elapsedSeconds?: number;
+  startTicks?: string;
+  canStop?: boolean;
+}
+export interface GpuProcessStopPreview {
+  pid: number;
+  name: string;
+  username: string;
+  token: string;
+  expiresAt: number;
+}
 export interface GpuCard {
   index: number;
   uuid: string;
@@ -40,6 +58,7 @@ export interface GpuCard {
   memoryUsedMiB: number | null;
   utilization: number | null;
   computeProcesses: number | { pid?: number; name?: string; memoryUsedMiB?: number | null }[];
+  processes?: GpuProcess[];
   idleCandidate?: boolean;
   idle: boolean;
   stableCount: number;
@@ -156,6 +175,7 @@ export interface ServerState {
     nextPollAt?: number | string | null;
     intervalSec: number;
     initialConfirming?: boolean;
+    processError?: string | null;
     error?: string;
   };
   slurm?: SlurmState;
@@ -223,6 +243,8 @@ export interface LionApi {
   connect(id: string, secrets?: Secrets): Promise<void>;
   disconnect(id: string): Promise<void>;
   refreshGpu(id: string): Promise<void>;
+  prepareGpuProcessStop(id: string, gpuUuid: string, pid: number): Promise<GpuProcessStopPreview>;
+  stopGpuProcess(id: string, token: string, mode: 'terminate' | 'kill'): Promise<{ pid: number; signalled: true }>;
   refreshSlurm(id: string): Promise<void>;
   setSlurmScope(id: string, scope: SlurmScope): Promise<void>;
   prepareJobCancel(id: string, jobId: string): Promise<JobCancelPreview>;

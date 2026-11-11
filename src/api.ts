@@ -60,6 +60,8 @@ function createTauriApi(): LionApi {
     connect: (id, secrets) => request('connect', id, secrets),
     disconnect: id => request('disconnect', id),
     refreshGpu: id => request('refresh-gpu', id),
+    prepareGpuProcessStop: (id, gpuUuid, pid) => request('prepare-gpu-process-stop', id, gpuUuid, pid),
+    stopGpuProcess: (id, token, mode) => request('stop-gpu-process', id, token, mode),
     refreshSlurm: id => request('refresh-slurm', id),
     refreshStorage: id => request('refresh-storage', id),
     refreshCodex: id => request('refresh-codex', id),

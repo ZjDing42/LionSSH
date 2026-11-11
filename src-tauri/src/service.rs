@@ -33,6 +33,8 @@ pub const PUBLIC_METHODS: &[&str] = &[
     "connect",
     "disconnect",
     "refresh-gpu",
+    "prepare-gpu-process-stop",
+    "stop-gpu-process",
     "refresh-slurm",
     "refresh-storage",
     "refresh-codex",
@@ -1061,6 +1063,8 @@ impl Service {
                 };
             }
             "refresh-gpu"
+            | "prepare-gpu-process-stop"
+            | "stop-gpu-process"
             | "refresh-slurm"
             | "refresh-storage"
             | "set-slurm-scope"

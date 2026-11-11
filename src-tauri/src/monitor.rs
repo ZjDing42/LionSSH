@@ -3,6 +3,7 @@
 //! Renderer input can select an operation, a validated job ID, or a one-use
 //! confirmation token. It can never supply a remote command or shell fragment.
 use crate::ssh::Executor;
+use crate::gpu_process::{self, StopTicket};
 use regex::Regex;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -308,8 +309,8 @@ fn parse_summary(input: &str) -> Result<(Vec<Value>, Vec<Value>, bool), String> 
                     continue;
                 }
                 recognized += 1;
-                if !p[3].eq_ignore_ascii_case("G") {
-                    processes.push(json!({"uuid":format!("GPU-summary-{}",&p[1]),"pid":p[2].parse::<u64>().map_err(|_|"进程编号无效")?,"name":&p[4],"memoryUsedMiB":measurement(&p[5])}));
+                if p[4].rsplit('/').next() != Some("Xorg") {
+                    processes.push(json!({"uuid":format!("GPU-summary-{}",&p[1]),"pid":p[2].parse::<u64>().map_err(|_|"进程编号无效")?,"name":&p[4],"type":p[3].to_uppercase(),"memoryUsedMiB":measurement(&p[5])}));
                 }
             } else {
                 invalid = true;
@@ -337,12 +338,13 @@ fn summarize_gpu(
         .iter()
         .any(|v| !known.contains(v["uuid"].as_str().unwrap_or("")));
     let cards=rows.iter().map(|card|{
-        let own=processes.iter().filter(|p|p["uuid"]==card["uuid"]).cloned().collect::<Vec<_>>();
+        let all=processes.iter().filter(|p|p["uuid"]==card["uuid"]).cloned().collect::<Vec<_>>();
+        let own=all.iter().filter(|p|p["type"]!="G").cloned().collect::<Vec<_>>();
         let candidate=!unknown_processes && card["processesKnown"]!=false && own.is_empty()
             && card["utilization"].as_f64().is_some_and(|v|v<=settings["idleUtil"].as_f64().unwrap())
             && card["memoryUsedMiB"].as_f64().is_some_and(|v|v<=settings["idleMemoryMiB"].as_f64().unwrap());
         let stable=if candidate{previous.iter().find(|v|v["uuid"]==card["uuid"]).and_then(|v|v["stableCount"].as_u64()).unwrap_or(0).saturating_add(1).min(settings["stableSamples"].as_u64().unwrap())}else{0};
-        let mut result=card.clone();merge(&mut result,json!({"computeProcesses":own,"idle":stable>=settings["stableSamples"].as_u64().unwrap(),"idleCandidate":candidate,"stableCount":stable}));result
+        let mut result=card.clone();merge(&mut result,json!({"processes":all,"computeProcesses":own,"idle":stable>=settings["stableSamples"].as_u64().unwrap(),"idleCandidate":candidate,"stableCount":stable}));result
     }).collect::<Vec<_>>();
     let idle_count = cards.iter().filter(|v| v["idle"] == true).count();
     json!({"cards":cards,"idleCount":idle_count,"total":rows.len()})
@@ -1181,6 +1183,7 @@ pub struct Monitor {
     summary_mode: AtomicBool,
     initial_remaining: AtomicU32,
     tokens: Mutex<HashMap<String, Confirmation>>,
+    gpu_stop_tokens: Mutex<HashMap<String, StopTicket>>,
     slurm_enabled: bool,
     storage_enabled: bool,
 }
@@ -1216,6 +1219,7 @@ impl Monitor {
             slurm_epoch: AtomicU64::new(0),
             summary_mode: AtomicBool::new(false),
             tokens: Mutex::new(HashMap::new()),
+            gpu_stop_tokens: Mutex::new(HashMap::new()),
             slurm_enabled,
             storage_enabled: slurm_enabled
                 && std::env::var("LION_STORAGE_DISABLED").ok().as_deref() != Some("1"),
@@ -1410,7 +1414,25 @@ impl Monitor {
             state["nextPollAt"] = Value::Null;
             self.emit("gpu", &state);
         }
-        let result = self.read_gpu().await;
+        let mut result = self.read_gpu().await;
+        let mut process_error = None;
+        if let Ok((_, processes)) = &mut result {
+            let pids = processes.iter().filter_map(|p| gpu_process::pid(&p["pid"]).ok()).collect::<HashSet<_>>().into_iter().collect::<Vec<_>>();
+            if !pids.is_empty() {
+                let details = match gpu_process::query(&pids) {
+                    Ok(command) => self.exec(&command, false).await.map_err(|e| e.message).and_then(|output| gpu_process::parse(&output, &pids)),
+                    Err(error) => Err(error),
+                };
+                match details {
+                    Ok(details) => for process in processes {
+                        if let Some(fields) = gpu_process::pid(&process["pid"]).ok().and_then(|pid| details.get(&pid)) {
+                            merge(process, fields.clone());
+                        }
+                    },
+                    Err(_) => process_error = Some("无法读取 GPU 进程归属，暂不能结束进程"),
+                }
+            }
+        }
         if self.cancel.is_cancelled() || epoch != self.gpu_epoch.load(Ordering::SeqCst) {
             return;
         }
@@ -1433,7 +1455,7 @@ impl Monitor {
                 merge(
                     &mut state,
                     json!({"status":"ready","lastUpdated":now(),"nextPollAt":null,"intervalSec":options["intervalSec"],
-                  "queryMode":if self.summary_mode.load(Ordering::SeqCst){"summary"}else{"csv"},"error":null,"availability":"available","availabilityReason":null,"availabilityCheckedAt":now(),"initialConfirming":initial}),
+                  "queryMode":if self.summary_mode.load(Ordering::SeqCst){"summary"}else{"csv"},"error":null,"processError":process_error,"availability":"available","availabilityReason":null,"availabilityCheckedAt":now(),"initialConfirming":initial}),
                 );
             }
             Err(error) => {
@@ -1514,8 +1536,20 @@ impl Monitor {
             let rows =
                 parse_gpu_rows(&self.exec(GPU_QUERY, false).await?).map_err(QueryError::new)?;
             known_rows = Some(rows.clone());
-            let processes = parse_compute_rows(&self.exec(COMPUTE_QUERY, false).await?)
-                .map_err(QueryError::new)?;
+            // The summary includes graphics processes too. Keep CSV UUIDs and
+            // precise GPU metrics, and map the full process table by GPU index.
+            let processes = match self.read_summary().await {
+                Ok((summary_rows, mut processes)) => {
+                    for process in &mut processes {
+                        if let Some(card) = summary_rows.iter().find(|card| card["uuid"] == process["uuid"])
+                            .and_then(|summary| rows.iter().find(|card| card["index"] == summary["index"])) {
+                            process["uuid"] = card["uuid"].clone();
+                        }
+                    }
+                    processes
+                }
+                Err(_) => parse_compute_rows(&self.exec(COMPUTE_QUERY, false).await?).map_err(QueryError::new)?,
+            };
             Ok((rows, processes))
         }
         .await;
@@ -1713,12 +1747,52 @@ impl Monitor {
     pub async fn action(&self, method: &str, args: &[Value]) -> Result<Value, String> {
         self.connected()?;
         match method {
+            "prepare-gpu-process-stop" | "stop-gpu-process" => self.gpu_process_action(method, args).await,
             "prepare-job-cancel" | "cancel-job" | "get-job-priority" => {
                 self.job_action(method, args).await
             }
             "prepare-tmp-cleanup" | "cleanup-tmp" => self.storage_action(method, args).await,
             _ => Err("不支持的远程操作".into()),
         }
+    }
+    async fn gpu_process_action(&self, method: &str, args: &[Value]) -> Result<Value, String> {
+        if method == "stop-gpu-process" {
+            let token = args.first().and_then(Value::as_str).unwrap_or("");
+            let ticket = self.gpu_stop_tokens.lock().await.remove(token).ok_or("结束进程确认已过期，请重新确认")?;
+            if ticket.expires <= now() { return Err("结束进程确认已过期，请重新确认".into()); }
+            let command = gpu_process::stop_command(&ticket, args.get(1).and_then(Value::as_str).unwrap_or(""))?;
+            let output = self.exec(&command, false).await.map_err(|e| e.message)?;
+            if output.trim() != "LION_GPU_SIGNAL_SENT" { return Err("结束结果暂时无法确认，请刷新进程列表".into()); }
+            self.refresh_gpu().await;
+            return Ok(json!({"pid":ticket.pid,"signalled":true}));
+        }
+        let uuid = args.first().and_then(Value::as_str).ok_or("请选择当前 GPU 的进程")?;
+        let pid = gpu_process::pid(args.get(1).unwrap_or(&Value::Null))?;
+        let process = {
+            let state = self.gpu.lock().await;
+            let max_age = state["intervalSec"].as_u64().unwrap_or(5) * 1000 + 15_000;
+            if !state["error"].is_null() || state["lastUpdated"].as_u64().is_none_or(|at| now().saturating_sub(at)>max_age) {
+                return Err("GPU 进程列表已过期，请先刷新".into());
+            }
+            state["cards"].as_array().and_then(|cards| cards.iter().find(|card| card["uuid"] == uuid))
+                .and_then(|card| card["processes"].as_array()).and_then(|processes| processes.iter().find(|p| p["pid"]==pid))
+                .filter(|p| p["canStop"]==true).cloned().ok_or("只能结束自己的 GPU 进程")?
+        };
+        let output = self.exec(&gpu_process::query(&[pid])?, false).await.map_err(|e| e.message)?;
+        let details = gpu_process::parse(&output, &[pid])?;
+        let live = details.get(&pid).ok_or("进程已经退出，请刷新列表")?;
+        if live["canStop"]!=true || live["uid"]!=process["uid"] || live["startTicks"]!=process["startTicks"] {
+            return Err("进程已变化，请重新确认".into());
+        }
+        self.connected()?;
+        let expires = now() + TOKEN_LIFETIME;
+        let token = uuid::Uuid::new_v4().to_string();
+        let mut tokens = self.gpu_stop_tokens.lock().await;
+        tokens.retain(|_, ticket| ticket.expires > now());
+        if tokens.len() >= 64 { return Err("请关闭已有确认框后重试".into()); }
+        tokens.insert(token.clone(), StopTicket { pid, uid:live["uid"].as_u64().unwrap() as u32,
+            started:live["startTicks"].as_str().unwrap_or("").parse().map_err(|_| "进程已变化，请重新确认")?, expires });
+        Ok(json!({"token":token,"expiresAt":expires,"pid":pid,"username":live["username"],"name":process["name"]}))
     }
     async fn job_action(&self, method: &str, args: &[Value]) -> Result<Value, String> {
         let job_id = args
@@ -2030,6 +2104,17 @@ mod tests {
             );
         }
         assert!(parse_summary("not a summary").is_err());
+    }
+    #[test]
+    fn gpu_process_table_keeps_graphics_apps_but_filters_xorg() {
+        let output = summary(true, false).replace("2000 C python", "2000 G /usr/bin/browser");
+        let (rows, processes, complete) = parse_summary(&output).unwrap();
+        assert!(complete);
+        assert_eq!(processes.len(), 3);
+        assert!(processes.iter().all(|process| !text(process, "name").ends_with("Xorg")));
+        let value = summarize_gpu(&rows, &processes, &json!({"stableSamples":1}), &[]);
+        assert_eq!(value["cards"][0]["processes"][0]["type"], "G");
+        assert_eq!(value["cards"][0]["computeProcesses"].as_array().unwrap().len(), 0);
     }
     #[test]
     fn capability_absence_requires_an_explicit_device_diagnostic() {
@@ -2556,6 +2641,7 @@ mod tests {
         owner: Mutex<String>,
         uid: Mutex<String>,
         fail_cancel: AtomicBool,
+        gpu_started: AtomicU64,
     }
     impl Fake {
         fn new() -> Arc<Self> {
@@ -2564,6 +2650,7 @@ mod tests {
                 owner: Mutex::new("research_user_long".into()),
                 uid: Mutex::new("1001".into()),
                 fail_cancel: AtomicBool::new(false),
+                gpu_started: AtomicU64::new(77),
             })
         }
     }
@@ -2576,7 +2663,11 @@ mod tests {
             _max_output: usize,
         ) -> Result<CommandOutput, String> {
             self.commands.lock().await.push(command.into());
-            let stdout = if command.starts_with("scontrol") {
+            let stdout = if command.starts_with("# Lion GPU process query") {
+                format!("LION_GPU_PROCESSES_V1\t1001\nPROCESS\t400\t{}\t{}\t60\t{}\nEND\n", self.uid.lock().await, self.owner.lock().await, self.gpu_started.load(Ordering::SeqCst))
+            } else if command.starts_with("# Lion GPU process stop") {
+                "LION_GPU_SIGNAL_SENT\n".into()
+            } else if command.starts_with("scontrol") {
                 if command.contains("grep -o") {
                     "Priority=12000\n".into()
                 } else {
@@ -2613,6 +2704,56 @@ mod tests {
                 exit_code: Some(0),
             })
         }
+    }
+    async fn gpu_harness() -> (Arc<Monitor>, Arc<Fake>) {
+        let (monitor, executor) = harness().await;
+        *monitor.gpu.lock().await = json!({"intervalSec":5,"error":null,"lastUpdated":now(),"cards":[{"uuid":"GPU-a","processes":[{
+            "pid":400,"name":"python","uid":1001,"username":"research_user_long","startTicks":"77","canStop":true
+        }]}]});
+        (monitor, executor)
+    }
+    #[tokio::test]
+    async fn gpu_process_stop_rejects_changed_ownership_and_reused_pids() {
+        let (monitor, executor) = gpu_harness().await;
+        *executor.uid.lock().await = "1002".into();
+        assert!(monitor.action("prepare-gpu-process-stop", &[json!("GPU-a"),json!(400)]).await.is_err());
+        *executor.uid.lock().await = "1001".into();
+        executor.gpu_started.store(78, Ordering::SeqCst);
+        assert!(monitor.action("prepare-gpu-process-stop", &[json!("GPU-a"),json!(400)]).await.is_err());
+        executor.gpu_started.store(77, Ordering::SeqCst);
+        assert!(monitor.action("prepare-gpu-process-stop", &[json!("GPU-b"),json!(400)]).await.is_err());
+        assert!(monitor.action("prepare-gpu-process-stop", &[json!("GPU-a"),json!(401)]).await.is_err());
+        monitor.gpu.lock().await["lastUpdated"] = json!(now()-30_000);
+        assert!(monitor.action("prepare-gpu-process-stop", &[json!("GPU-a"),json!(400)]).await.is_err());
+        assert!(!executor.commands.lock().await.iter().any(|command|command.starts_with("# Lion GPU process stop")));
+    }
+    #[tokio::test]
+    async fn gpu_process_stop_requires_one_use_confirmation_and_fixed_signal() {
+        for (mode, signal) in [("terminate","TERM"),("kill","KILL")] {
+            let (monitor, executor) = gpu_harness().await;
+            let preview = monitor.action("prepare-gpu-process-stop", &[json!("GPU-a"),json!(400)]).await.unwrap();
+            let (other, _) = gpu_harness().await;
+            assert!(other.action("stop-gpu-process", &[preview["token"].clone(),json!(mode)]).await.is_err());
+            assert!(monitor.action("stop-gpu-process", &[preview["token"].clone(),json!(mode)]).await.is_ok());
+            assert!(monitor.action("stop-gpu-process", &[preview["token"].clone(),json!(mode)]).await.is_err());
+            let commands = executor.commands.lock().await;
+            let commands = commands.iter().filter(|command|command.starts_with("# Lion GPU process stop")).collect::<Vec<_>>();
+            assert_eq!(commands.len(),1);
+            assert!(commands[0].contains(&format!("kill -{signal} 400 || exit 1")));
+            assert!(commands[0].contains("1001 1001 1001 1001"));
+            assert!(commands[0].contains("[ \"$1\" = '77' ]"));
+        }
+    }
+    #[tokio::test]
+    async fn gpu_process_stop_refuses_expired_confirmations_and_disconnects() {
+        let (monitor, executor) = gpu_harness().await;
+        let preview = monitor.action("prepare-gpu-process-stop", &[json!("GPU-a"),json!(400)]).await.unwrap();
+        monitor.gpu_stop_tokens.lock().await.get_mut(preview["token"].as_str().unwrap()).unwrap().expires = now()-1;
+        assert!(monitor.action("stop-gpu-process", &[preview["token"].clone(),json!("kill")]).await.is_err());
+        let preview = monitor.action("prepare-gpu-process-stop", &[json!("GPU-a"),json!(400)]).await.unwrap();
+        monitor.cancel.cancel();
+        assert!(monitor.action("stop-gpu-process", &[preview["token"].clone(),json!("kill")]).await.is_err());
+        assert!(!executor.commands.lock().await.iter().any(|command|command.starts_with("# Lion GPU process stop")));
     }
     async fn harness() -> (Arc<Monitor>, Arc<Fake>) {
         let executor = Fake::new();

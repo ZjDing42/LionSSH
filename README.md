@@ -14,7 +14,7 @@
 | --- | --- |
 | Multiple SSH connections | Connect to servers independently using passwords, keyboard-interactive authentication, or private keys with optional passphrases. Confirm host fingerprints on first connection. |
 | Port tunnels | Manage forward and reverse tunnels with multiple rules, failure detection, and automatic recovery. |
-| NVIDIA GPU monitoring | See GPU usage and idle counts, with scheduled checks, pause, and manual refresh. |
+| NVIDIA GPU monitoring | See GPU usage, idle counts, process owners and per-GPU process details; confirm before ending your own processes. Supports scheduled checks, pause, and manual refresh. |
 | Slurm job management | View your jobs or all jobs, inspect status and queue reasons, query Priority, and cancel your own jobs after confirmation. |
 | SFTP file manager | Browse remote directories, edit text, preview images, transfer files and folders, and copy between servers. |
 | Personal storage | Count your files in accessible directories, skipping permission-denied paths; preview and confirm cleanup of your own temporary files. |
@@ -27,6 +27,14 @@
 The default is **System**: Chinese system locales use Simplified Chinese, and all other system locales use English. In the bottom-left sidebar, use **Language** to choose **中文**, **English**, or **System** at any time. Changes apply immediately, and your choice is saved for the next launch.
 
 Interface labels, dialogs, notifications, and tray menus follow this preference. Server names, custom terminal names, and remote terminal output keep their original content.
+
+## GPU processes
+
+On Linux NVIDIA servers, GPU cards show unique process owners, excluding Xorg. The user with the highest PID appears first; a `+N` badge indicates additional users. Hover over the badge to see only those other users in a custom list. A single-user badge has no popup.
+
+Click a GPU card to open its process table, showing PID, process name, user, elapsed time, GPU memory and process type. It follows the GPU monitoring interval and also supports manual refresh. Only your own processes have a stop action: choose **Cancel**, **Terminate** or **Force stop** in the confirmation dialog. The backend rechecks ownership and process identity before signaling that PID. Ending a process does not actively cancel a Slurm job that launched it.
+
+The panel opens with a Gaussian blur transition. Close with `×` or Escape to return to the GPU card, or click outside for an edge-particle dissolve with a progressively blurred table remnant. Text follows the app theme, the page keeps its scrollbar space, and reduced-motion preferences are respected.
 
 ## Tools
 
@@ -66,7 +74,7 @@ Tool panels use the available window width with fixed side margins. Personal sto
 
 ## Download
 
-**[Download the latest release](https://github.com/ZjDing42/LionSSH/releases/latest)** · [v1.10.6 release notes](.github/release-notes/v1.10.6.md)
+**[Download the latest release](https://github.com/ZjDing42/LionSSH/releases/latest)** · [v1.11.0 release notes](.github/release-notes/v1.11.0.md)
 
 | Platform | Package |
 | --- | --- |

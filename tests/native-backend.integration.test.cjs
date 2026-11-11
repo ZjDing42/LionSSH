@@ -11,6 +11,7 @@ const { ServiceHarness } = require('./helpers/service-harness.cjs');
 const { localSshServer, echoServer, freePort, roundTrip } = require('./helpers/local-ssh.cjs');
 const { profile, tunnel, delay } = require('./helpers/fixtures.cjs');
 const { mineQueue, allQueue } = require('./helpers/slurm-output.cjs');
+const { makeSummary } = require('./helpers/nvidia-summary.cjs');
 const commands = require('./fixtures/commands.json');
 const packageInfo = require('../package.json');
 
@@ -230,13 +231,33 @@ test('wrong passwords fail while another device can still connect and transport 
 });
 
 test('GPU CSV monitoring confirms idle cards, falls back to summary, and keeps distinct capability states', integration, async t => {
-  const { backend, ssh } = await fixture(t);
+  // Structured metrics and the full process table describe the same GPUs.
+  const summary = makeSummary({
+    cards: [19, 8192].map((memoryUsedMiB, index) => ({ index, name: 'NVIDIA Test Card', memoryUsedMiB, memoryTotalMiB: 24576, utilization: 0 })),
+    processes: [
+      { index: 0, pid: 1000, type: 'G', name: '/usr/lib/xorg/Xorg', memory: 4 },
+      { index: 1, pid: 4242, type: 'C', name: 'training', memory: 8192 },
+    ],
+  });
+  const { backend, ssh } = await fixture(t, {
+    response: command => command === 'nvidia-smi' ? summary : undefined,
+    gpuProcessResponse: command => {
+      const pids = /ps -p ([0-9,]+) -o pid=,uid=,user:128=,etimes=/.exec(command)?.[1];
+      assert.ok(pids, 'process lookup uses only numeric PID arguments');
+      return `LION_GPU_PROCESSES_V1\t1000\n${pids.split(',').map(pid => `PROCESS\t${pid}\t1000\ttester\t60\t777\n`).join('')}END\n`;
+    },
+  });
   const gpu = { enabled: true, intervalSec: 2, idleUtil: 5, idleMemoryMiB: 512, stableSamples: 2 };
   const input = profile(ssh, { autoReconnect: false, gpu });
   await connect(backend, input);
   const state = await backend.state(input.id, value => value.gpu.status === 'ready' && value.gpu.idleCount === 1, 'initial stable idle GPU samples');
   assert.equal(state.gpu.queryMode, 'csv'); assert.equal(state.gpu.total, 2);
   assert.equal(state.gpu.cards.find(card => card.uuid === 'GPU-busy').idle, false);
+  assert.equal(state.gpu.processError, null);
+  assert.deepEqual(state.gpu.cards.find(card => card.uuid === 'GPU-idle').processes, [], 'Xorg does not appear as a GPU user');
+  const process = state.gpu.cards.find(card => card.uuid === 'GPU-busy').processes[0];
+  assert.equal(process.pid, 4242); assert.equal(process.username, 'tester');
+  assert.equal(process.elapsedSeconds, 60); assert.equal(process.canStop, true);
   ssh.setNvidiaResponse(command => command === 'nvidia-smi' ? undefined : { stderr: 'Structured query restricted by allocation\n', exitCode: 1 });
   await backend.invoke('refresh-gpu', input.id);
   const fallback = await backend.state(input.id, value => value.gpu.status === 'ready' && value.gpu.queryMode === 'summary', 'summary fallback');
