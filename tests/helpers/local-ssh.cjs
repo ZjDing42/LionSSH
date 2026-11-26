@@ -272,6 +272,13 @@ async function localSshServer(options = {}) {
             writeResponse(stream, response ?? { stderr: 'squeue: command not found\n', exitCode: 127 });
             return;
           }
+          if (options.gpuModels && info.command.startsWith('for file in /proc/driver/nvidia/gpus/*/information; do\n')) {
+            stats.commands.push(info.command);
+            const stream = acceptExec();
+            stream.on('error', () => {});
+            writeResponse(stream, options.gpuModels);
+            return;
+          }
           if (!/^nvidia-smi(?:\s|$)/.test(info.command) || /[;&|`\r\n]/.test(info.command)) {
             stats.rejectedCommands.push(info.command);
             return reject();

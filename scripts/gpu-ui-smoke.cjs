@@ -20,7 +20,9 @@ async function fixture(page) {
       { utilization: 30, memoryUsedMiB: 1024, memoryTotalMiB: null, idle: false, computeProcesses: 1 },
       { utilization: 68, memoryUsedMiB: 21225, memoryTotalMiB: 24576, idle: false, computeProcesses: 1 },
       { utilization: 0, memoryUsedMiB: 15, memoryTotalMiB: 24576, idle: true, computeProcesses: 0 },
-    ].map((card, index) => ({ index, uuid: `fixture-gpu-${index}`, name: 'NVIDIA GeForce RTX 4090', stableCount: 2, ...card }));
+    ].map((card, index) => ({ index, uuid: `fixture-gpu-${index}`, name: [
+      'NVIDIA RTX PRO 5000 Blackwell', 'NVIDIA RTX PRO 6000 Blackwell Workstation Edition',
+    ][index] ?? 'NVIDIA GeForce RTX 4090', stableCount: 2, ...card }));
     const gpu = { enabled: true, intervalSec: 5, idleUtil: 5, idleMemoryMiB: 512, stableSamples: 2 };
     const profile = { id: 'gpu-fixture', name: 'GPU 服务器', host: 'gpu.example', port: 22, username: 'user', authType: 'key', keyPath: '', autoReconnect: true, gpu, tunnels: [] };
     const state = { profileId: profile.id, status: 'connected', gpu: { status: 'ready', availability: 'available', cards, total: cards.length, idleCount: 2, intervalSec: 5, lastUpdated: Date.now(), nextPollAt: Date.now() + 5000 }, tunnels: [], events: [] };
@@ -96,6 +98,7 @@ async function main() {
     await page.getByTestId('gpu-card').waitFor();
     await page.getByRole('button', { name: '查看显卡详情', exact: true }).click();
     await page.getByTestId('gpu-utilization-meter').first().waitFor();
+    assert.equal(await page.locator('.gpu-detail > strong').first().textContent(), 'NVIDIA RTX PRO 5000 Blackwell');
     for (const language of ['zh', 'en']) {
       await page.getByTestId('language-select').selectOption(language);
       for (const theme of ['light', 'dark']) {
@@ -104,6 +107,15 @@ async function main() {
         for (const width of [1500, 800]) {
           await page.setViewportSize({ width, height: 1400 });
           const report = await inspect(page, language);
+          if (width === 800) {
+            assert(await page.locator('.gpu-detail > strong').nth(1).evaluate(title => {
+              const range = document.createRange();
+              range.selectNodeContents(title);
+              const bounds = title.getBoundingClientRect();
+              const lines = [...range.getClientRects()];
+              return lines.length > 1 && lines.every(line => line.right <= bounds.right + 1);
+            }), 'long GPU model wraps within the card');
+          }
           reports.push({ language, theme, width, ...report });
           if (language === 'zh') await page.getByTestId('gpu-card').screenshot({ path: path.join(output, `gpu-meters-${theme}-${width}.png`), animations: 'disabled' });
         }

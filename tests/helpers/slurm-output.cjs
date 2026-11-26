@@ -1,17 +1,10 @@
 'use strict';
 
-// Priority and the full username precede squeue's right-aligned columns.
-const queueCommand = "squeue -o '%Q|%u|%.18i %.9P %.8j %.8u %.2t %.10M %.6D %R'";
+// Job name is last so it can contain spaces and pipes.
+const queueCommand = "squeue -o '%Q|%i|%P|%u|%t|%M|%D|%R|%j'";
 const mineQueueCommand = `${queueCommand} -u tester`;
-const widths = [18, 9, 8, 8, 2, 10, 6];
-function row(values) {
-  return values.map((value, index) => index < widths.length ? String(value).padStart(widths[index]) : value).join(' ');
-}
-const HEADER = row(['JOBID', 'PARTITION', 'NAME', 'USER', 'ST', 'TIME', 'NODES', 'NODELIST(REASON)']);
-const runningRow = row(['4201', 'gpu', 'train', 'tester', 'R', '1:02:03', 2, 'gpu[01-02]']);
-const pendingRow = row(['4202', 'gpu', 'next', 'tester', 'PD', '0:00', 1, '(Resources)']);
-const allRow = row(['4203', 'batch', 'other', 'another', 'CG', '2-01:02:03', 1, 'cpu09']);
-const mineQueue = `PRIORITY|USER|${HEADER}\n3427|tester|${runningRow}\n0|tester|${pendingRow}\n`;
-const allQueue = `${mineQueue}98765|another|${allRow}\n`;
+const runningJobName = 'train_model_blackwell | validation';
+const mineQueue = `PRIORITY|JOBID|PARTITION|USER|ST|TIME|NODES|NODELIST(REASON)|NAME\n3427|4201|gpu|tester|R|1:02:03|2|gpu[01-02]|${runningJobName}\n0|4202|gpu|tester|PD|0:00|1|(Resources)|next\n`;
+const allQueue = `${mineQueue}98765|4203|batch|another|CG|2-01:02:03|1|cpu09|other\n`;
 
-module.exports = { HEADER, row, runningRow, pendingRow, allRow, mineQueue, allQueue, queueCommand, mineQueueCommand };
+module.exports = { mineQueue, allQueue, queueCommand, mineQueueCommand, runningJobName };

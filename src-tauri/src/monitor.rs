@@ -13,12 +13,20 @@ use std::sync::{
     Arc,
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, OnceCell};
 use tokio_util::sync::CancellationToken;
 
 const GPU_QUERY: &str = "nvidia-smi --query-gpu=index,uuid,name,memory.total,memory.used,utilization.gpu --format=csv,noheader,nounits";
 const COMPUTE_QUERY: &str = "nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_memory --format=csv,noheader,nounits";
 const SUMMARY_QUERY: &str = "nvidia-smi";
+const GPU_MODELS_QUERY: &str = r#"for file in /proc/driver/nvidia/gpus/*/information; do
+    [ -r "$file" ] || continue
+    bus=${file%/information}
+    bus=${bus##*/}
+    model=$(sed -n 's/^Model:[[:space:]]*//p' "$file" 2>/dev/null) || continue
+    printf '%s\t%s\n' "$bus" "$model"
+done
+:"#;
 const MAX_OUTPUT: usize = 4_194_304;
 const JOB_LOG_LIMIT: usize = 1_048_576;
 const SAFE_INTEGER: u64 = 9_007_199_254_740_991;
@@ -199,6 +207,27 @@ fn parse_compute_rows(input: &str) -> Result<Vec<Value>, String> {
         })
         .collect()
 }
+fn gpu_pci_bus_id(value: &str) -> Option<String> {
+    let pattern = re(r"(?i)^([0-9a-f]{4,8}):([0-9a-f]{2}:[0-9a-f]{2}\.[0-7])$");
+    let parts = pattern.captures(value)?;
+    let domain = u32::from_str_radix(&parts[1], 16).ok()?;
+    Some(format!("{domain:08x}:{}", parts[2].to_ascii_lowercase()))
+}
+
+fn parse_gpu_models(output: &str) -> HashMap<String, String> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let (bus, name) = line.split_once('\t')?;
+            let name = name.trim();
+            if name.is_empty() || name.chars().any(char::is_control) {
+                return None;
+            }
+            Some((gpu_pci_bus_id(bus)?, name.to_owned()))
+        })
+        .collect()
+}
+
 fn parse_summary(input: &str) -> Result<(Vec<Value>, Vec<Value>, bool), String> {
     let input = strip_ansi(input);
     if !re(r"(?i)NVIDIA-SMI").is_match(&input) {
@@ -231,7 +260,14 @@ fn parse_summary(input: &str) -> Result<(Vec<Value>, Vec<Value>, bool), String> 
             let index = h[1]
                 .parse::<u32>()
                 .map_err(|_| "无法解析 nvidia-smi 显卡编号")?;
-            rows.push(json!({"index":index,"uuid":format!("GPU-summary-{index}"),"name":h[2].trim(),"memoryTotalMiB":null,"memoryUsedMiB":null,"utilization":null}));
+            let name = h[2].trim();
+            let mut row = json!({"index":index,"uuid":format!("GPU-summary-{index}"),"name":name,"memoryTotalMiB":null,"memoryUsedMiB":null,"utilization":null});
+            if name.ends_with("...") || name.ends_with('…') {
+                if let Some(bus) = cells[1].split_whitespace().next().and_then(gpu_pci_bus_id) {
+                    row["pciBusId"] = json!(bus);
+                }
+            }
+            rows.push(row);
             measured.push(false);
             continue;
         }
@@ -352,7 +388,9 @@ fn summarize_gpu(
     json!({"cards":cards,"idleCount":idle_count,"total":rows.len()})
 }
 
-const SQUEUE_COMMAND: &str = "squeue -o '%Q|%u|%.18i %.9P %.8j %.8u %.2t %.10M %.6D %R'";
+// Put the unbounded job name last so spaces and delimiters in the name survive.
+const SQUEUE_COMMAND: &str = "squeue -o '%Q|%i|%P|%u|%t|%M|%D|%R|%j'";
+const SQUEUE_HEADER: &str = "PRIORITY|JOBID|PARTITION|USER|ST|TIME|NODES|NODELIST(REASON)|NAME";
 
 fn squeue_command(username: &str, scope: &str) -> Result<String, String> {
     if scope == "all" {
@@ -591,6 +629,22 @@ fn valid_fields(fields: &[String]) -> bool {
             .is_match(&fields[5])
         && re(r"^(?:\d+|N/A|-)$").is_match(&fields[6])
 }
+fn squeue_job(fields: &[String], priority: Option<u32>, cluster: &str) -> Value {
+    let mut node_list = fields[7].as_str();
+    let mut reason_code = "";
+    if let Some(parts) = re(r"^(.*?)\s*\((.*)\)\s*$").captures(&fields[7]) {
+        node_list = parts.get(1).unwrap().as_str().trim();
+        reason_code = parts.get(2).unwrap().as_str().trim();
+    }
+    let (label, tone) = translate_state(&fields[4]);
+    let mut job = json!({"id":fields[0],"partition":fields[1],"name":fields[2],"user":fields[3],"stateCode":fields[4],"stateLabel":label,"stateTone":tone,"elapsed":fields[5],
+      "nodes":fields[6].parse::<u64>().ok(),"nodeList":if node_list=="(null)"{""}else{node_list},"reasonCode":reason_code,"reasonLabel":translate_reason(reason_code),"priority":priority});
+    if !cluster.is_empty() {
+        job["cluster"] = json!(cluster);
+    }
+    job
+}
+
 fn parse_squeue(output: &str) -> Result<Vec<Value>, String> {
     if output.len() > MAX_OUTPUT {
         return Err("squeue 输出格式不正确或超过限制".into());
@@ -611,6 +665,7 @@ fn parse_squeue(output: &str) -> Result<Vec<Value>, String> {
     let mut saw_header = false;
     let mut has_priority = false;
     let mut has_full_user = false;
+    let mut delimited = false;
     let mut cluster = String::new();
     let tokens = re(r"\S+");
     let loose = re(
@@ -623,9 +678,29 @@ fn parse_squeue(output: &str) -> Result<Vec<Value>, String> {
         if let Some(c) = re(r"(?i)^\s*CLUSTER:\s*(\S+)\s*$").captures(line) {
             cluster = c[1].into();
             columns = None;
+            delimited = false;
             continue;
         }
         if re(r"(?i)^\s*squeue:\s*warning\b").is_match(line) {
+            continue;
+        }
+        if line.trim() == SQUEUE_HEADER {
+            saw_header = true;
+            delimited = true;
+            continue;
+        }
+        if delimited {
+            let parts = line.splitn(9, '|').map(str::trim).collect::<Vec<_>>();
+            let [priority, id, partition, user, state, time, nodes, reason, name] = parts.as_slice()
+            else {
+                return Err("squeue 作业行格式无法识别".into());
+            };
+            let fields = [*id, *partition, *name, *user, *state, *time, *nodes, *reason]
+                .map(str::to_owned);
+            if !valid_fields(&fields) {
+                return Err("squeue 作业行格式无法识别".into());
+            }
+            jobs.push(squeue_job(&fields, priority.parse().ok(), &cluster));
             continue;
         }
         let priority_header = line.strip_prefix("PRIORITY|");
@@ -702,19 +777,10 @@ fn parse_squeue(output: &str) -> Result<Vec<Value>, String> {
                 return Err("squeue 作业行格式无法识别，请使用默认输出格式".into());
             }
         }
-        let mut node_list = fields[7].clone();
-        let mut reason_code = String::new();
-        if let Some(c) = re(r"^(.*?)\s*\((.*)\)\s*$").captures(&fields[7]) {
-            node_list = c[1].trim().into();
-            reason_code = c[2].trim().into();
+        if let Some(user) = full_user {
+            fields[3] = user.to_owned();
         }
-        let (label, tone) = translate_state(&fields[4]);
-        let mut job = json!({"id":fields[0],"partition":fields[1],"name":fields[2],"user":full_user.unwrap_or(&fields[3]),"stateCode":fields[4],"stateLabel":label,"stateTone":tone,"elapsed":fields[5],
-          "nodes":fields[6].parse::<u64>().ok(),"nodeList":if node_list=="(null)"{""}else{&node_list},"reasonCode":reason_code,"reasonLabel":translate_reason(&reason_code),"priority":priority});
-        if !cluster.is_empty() {
-            job["cluster"] = json!(cluster);
-        }
-        jobs.push(job);
+        jobs.push(squeue_job(&fields, priority, &cluster));
     }
     if !saw_header {
         return Err("squeue 未返回可识别的作业表头".into());
@@ -1286,6 +1352,7 @@ pub struct Monitor {
     gpu_epoch: AtomicU64,
     slurm_epoch: AtomicU64,
     summary_mode: AtomicBool,
+    gpu_models: OnceCell<HashMap<String, String>>,
     initial_remaining: AtomicU32,
     tokens: Mutex<HashMap<String, Confirmation>>,
     gpu_stop_tokens: Mutex<HashMap<String, StopTicket>>,
@@ -1323,6 +1390,7 @@ impl Monitor {
             gpu_epoch: AtomicU64::new(0),
             slurm_epoch: AtomicU64::new(0),
             summary_mode: AtomicBool::new(false),
+            gpu_models: OnceCell::new(),
             tokens: Mutex::new(HashMap::new()),
             gpu_stop_tokens: Mutex::new(HashMap::new()),
             slurm_enabled,
@@ -1623,7 +1691,27 @@ impl Monitor {
     }
     async fn read_summary(&self) -> Result<(Vec<Value>, Vec<Value>), QueryError> {
         let output = self.exec(SUMMARY_QUERY, false).await?;
-        let (rows, processes, complete) = parse_summary(&output).map_err(QueryError::new)?;
+        let (mut rows, processes, complete) = parse_summary(&output).map_err(QueryError::new)?;
+        let models = if self.summary_mode.load(Ordering::SeqCst)
+            && rows.iter().any(|row| row.get("pciBusId").is_some())
+        {
+            Some(
+                self.gpu_models.get_or_init(|| async {
+                    self.exec(GPU_MODELS_QUERY, false)
+                        .await
+                        .map(|output| parse_gpu_models(&output))
+                        .unwrap_or_default()
+                }).await,
+            )
+        } else {
+            None
+        };
+        for row in &mut rows {
+            let bus = row.as_object_mut().unwrap().remove("pciBusId");
+            if let Some(name) = models.and_then(|models| models.get(bus.as_ref()?.as_str()?)) {
+                row["name"] = json!(name);
+            }
+        }
         if !complete {
             let mut e = QueryError::new("nvidia-smi 进程表不完整，无法确认显卡是否空闲");
             e.detected = true;

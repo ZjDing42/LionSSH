@@ -495,6 +495,15 @@ async function verifyPersistentRestart(errors) {
     assert.deepEqual(await headers.allTextContents(), ['作业编号', '分区', '作业名称', '用户', '状态', '已运行时间', '节点数', '节点列表', '原因', '权重', '日志删除']);
     assert.deepEqual(await headers.last().locator('span').allTextContents(), ['日志', '删除']);
     assert.equal(await card.locator('tbody tr').count(), 3);
+    const longName = card.locator('.slurm-job-name').nth(1);
+    assert.equal(await longName.textContent(), 'very_long_training_experiment_name_for_array_jobs');
+    assert(await longName.evaluate(name => {
+      const range = document.createRange();
+      range.selectNodeContents(name);
+      const bounds = name.getBoundingClientRect();
+      const lines = [...range.getClientRects()];
+      return lines.length > 1 && lines.every(line => line.right <= bounds.right + 1);
+    }), 'long Slurm job name wraps within its column');
     assert.equal(await card.getByText('运行中', { exact: true }).count(), 1);
     assert.equal(await card.getByText('等待可用资源', { exact: true }).count(), 1);
     assert.equal(await card.getByText('达到服务质量规定的用户通用资源上限', { exact: true }).count(), 1);

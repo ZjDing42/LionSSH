@@ -340,7 +340,7 @@ button { border: 0; }
 .mini-badge { font-size: 10px; border-radius: 4px; padding: 2px 5px; background: #f0f3f8; }
 .mini-badge.positive { background: #eaf5ef; }
 .mini-badge.pending { background: #f7f1e6; }
-.gpu-detail > strong { display: block; color: var(--text-secondary); font-size: 12px; font-weight: 600; margin-top: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gpu-detail > strong { display: block; color: var(--text-secondary); font-size: 12px; font-weight: 600; margin-top: 11px; overflow-wrap: anywhere; }
 .gpu-metrics { display: grid; gap: 11px; color: var(--text-subtle); font-size: 10px; margin-top: 14px; }
 .gpu-metric { min-width: 0; }
 .gpu-metric-label { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 3px 8px; line-height: 1.5; }
@@ -399,7 +399,7 @@ button { border: 0; }
 .slurm-job-id > span, .slurm-job-id > small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .slurm-job-id > small { font-size: 10px; color: var(--text-subtle); margin-top: 3px; }
 .slurm-cell-text { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.slurm-job-name { color: var(--text); font-weight: 500; }
+.slurm-job-name { display: block; color: var(--text); font-weight: 500; overflow-wrap: anywhere; }
 .slurm-job-state { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 .slurm-job-state .status-dot { width: 5px; height: 5px; }
 .slurm-elapsed, .slurm-node-count { font-variant-numeric: tabular-nums; white-space: nowrap; }

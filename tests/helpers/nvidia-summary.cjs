@@ -34,7 +34,7 @@ function makeSummary(options = {}) {
     const used = card.memoryUsedMiB === null ? 'N/A' : `${card.memoryUsedMiB}MiB`;
     const total = card.memoryTotalMiB === null ? 'N/A' : `${card.memoryTotalMiB}MiB`;
     const utilization = card.utilization === null ? 'N/A' : `${card.utilization}%`;
-    lines.push(`| ${String(card.index).padStart(3)}  ${card.name}       Off |   00000000:18:00.0 Off |                  Off |`);
+    lines.push(`| ${String(card.index).padStart(3)}  ${card.name}       Off |   ${card.busId || '00000000:18:00.0'} Off |                  Off |`);
     lines.push(`|  0%   32C    P8             26W /  450W | ${used.padStart(10)} / ${total.padStart(8)} | ${utilization.padStart(6)}      Default |`);
     lines.push('|                                         |                        |                  N/A |');
     lines.push('+-----------------------------------------+------------------------+----------------------+');

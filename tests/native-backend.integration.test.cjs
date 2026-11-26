@@ -10,8 +10,8 @@ const { createPrivateKey } = require('node:crypto');
 const { ServiceHarness } = require('./helpers/service-harness.cjs');
 const { localSshServer, echoServer, freePort, roundTrip } = require('./helpers/local-ssh.cjs');
 const { profile, tunnel, delay } = require('./helpers/fixtures.cjs');
-const { mineQueue, allQueue, queueCommand, mineQueueCommand, row } = require('./helpers/slurm-output.cjs');
-const { makeSummary } = require('./helpers/nvidia-summary.cjs');
+const { mineQueue, allQueue, queueCommand, mineQueueCommand, runningJobName } = require('./helpers/slurm-output.cjs');
+const { makeSummary, cards: summaryCards } = require('./helpers/nvidia-summary.cjs');
 const commands = require('./fixtures/commands.json');
 const packageInfo = require('../package.json');
 
@@ -241,6 +241,13 @@ test('GPU CSV monitoring confirms idle cards, falls back to summary, and keeps d
   });
   const { backend, ssh } = await fixture(t, {
     response: command => command === 'nvidia-smi' ? summary : undefined,
+    summaryOutput: makeSummary({ cards: summaryCards.map((card, index) => {
+      if (index === 0) return { ...card, name: 'NVIDIA RTX PRO 5000 Blac...', busId: '00000000:AB:00.0' };
+      if (index === 1) return { ...card, name: 'NVIDIA RTX PRO 6000 Blac...', busId: '00000001:9A:00.0' };
+      if (index === 2) return { ...card, name: 'NVIDIA RTX PRO 4000 Blac...', busId: '00000000:AC:00.0' };
+      return card;
+    }) }),
+    gpuModels: '0001:9a:00.0\tNVIDIA RTX PRO 6000 Blackwell\n0000:ab:00.0\tNVIDIA RTX PRO 5000 Blackwell\n',
     gpuProcessResponse: command => {
       const pids = /ps -p ([0-9,]+) -o pid=,uid=,user:128=,etimes=/.exec(command)?.[1];
       assert.ok(pids, 'process lookup uses only numeric PID arguments');
@@ -262,6 +269,11 @@ test('GPU CSV monitoring confirms idle cards, falls back to summary, and keeps d
   await backend.invoke('refresh-gpu', input.id);
   const fallback = await backend.state(input.id, value => value.gpu.status === 'ready' && value.gpu.queryMode === 'summary', 'summary fallback');
   assert.equal(fallback.gpu.total, 8);
+  assert.deepEqual(fallback.gpu.cards.slice(0, 3).map(card => card.name), [
+    'NVIDIA RTX PRO 5000 Blackwell', 'NVIDIA RTX PRO 6000 Blackwell', 'NVIDIA RTX PRO 4000 Blac...',
+  ]);
+  await backend.invoke('refresh-gpu', input.id);
+  assert.equal(ssh.stats.commands.filter(command => command.startsWith('for file in /proc/driver/nvidia/')).length, 1);
   ssh.setNvidiaResponse({ stderr: 'Insufficient Permissions\n', exitCode: 4 });
   await backend.invoke('refresh-gpu', input.id);
   const denied = await backend.state(input.id, value => value.gpu.status === 'error', 'temporary GPU permission failure');
@@ -301,6 +313,7 @@ test('Slurm scopes, priority, owner rechecks, injected identifiers and one-use c
   const mine = await monitors(backend, input.id);
   assert.ok(ssh.stats.slurmCommands.includes(mineQueueCommand));
   assert.deepEqual(mine.slurm.jobs.map(job => job.priority), [3427, 0]);
+  assert.equal(mine.slurm.jobs[0].name, runningJobName);
   await backend.invoke('set-slurm-scope', input.id, 'all');
   const all = await backend.state(input.id, value => value.slurm.scope === 'all' && value.slurm.jobs.length === 3, 'all Slurm jobs');
   assert.ok(ssh.stats.slurmCommands.includes(queueCommand));
@@ -330,11 +343,10 @@ test('Slurm scopes, priority, owner rechecks, injected identifiers and one-use c
 });
 
 test('Slurm log reads recheck running state and ownership, preserve paths, and read only the selected stream', integration, async t => {
-  const otherRunning = row(['4203', 'batch', 'other', 'another', 'R', '2:03', 1, 'cpu09']);
   let owner = 'tester';
   let state = 'RUNNING';
   const { backend, ssh } = await fixture(t, {
-    squeueResponse: command => command === queueCommand ? `${mineQueue}20|another|${otherRunning}\n` : mineQueue,
+    squeueResponse: command => command === queueCommand ? `${mineQueue}20|4203|batch|another|R|2:03|1|cpu09|other\n` : mineQueue,
     jobResponse: command => {
       if (command === commands.jobs['4201'].info) {
         return `${jobRecord('4201', owner).replace('RUNNING', state)}   StdOut=/data/job's logs/job.out\n   StdErr=/data/job's logs/job.err\n`;

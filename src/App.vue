@@ -1209,7 +1209,7 @@ onUnmounted(() => { cancelConnectionTest(); disposed = true; clearInterval(clock
               <tbody><tr v-for="job in slurmPageRows" :key="`${job.cluster || ''}:${job.id}:${job.partition}`">
                 <td class="slurm-job-id"><span :title="job.id">{{ job.id }}</span><small v-if="job.cluster" :title="job.cluster">{{ job.cluster }}</small></td>
                 <td><span class="slurm-cell-text" :title="job.partition">{{ job.partition || '—' }}</span></td>
-                <td><span class="slurm-cell-text slurm-job-name" :title="job.name">{{ job.name || '—' }}</span></td>
+                <td><span class="slurm-job-name" :title="job.name">{{ job.name || '—' }}</span></td>
                 <td><span class="slurm-cell-text" :title="job.user">{{ job.user || '—' }}</span></td>
                 <td><span class="slurm-job-state" :class="job.stateTone" :title="slurmStateTitle(job)"><i class="status-dot" :class="job.stateTone" />{{ message(job.stateLabel) }}</span></td>
                 <td class="slurm-elapsed">{{ job.elapsed || '—' }}</td>
