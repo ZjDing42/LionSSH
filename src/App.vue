@@ -1204,7 +1204,20 @@ onUnmounted(() => { cancelConnectionTest(); disposed = true; clearInterval(clock
           <div v-if="slurmInitialLoading" class="slurm-empty" data-testid="slurm-loading" role="status"><Icon name="refresh" :size="19" class="spinning" /><span>{{ t(slurmScope === 'mine' ? '正在读取个人作业…' : '正在读取全部作业…') }}</span></div>
           <div v-else-if="slurmJobs.length" class="slurm-table-wrap" tabindex="0" role="region" :aria-label="t('Slurm 作业列表，可横向滚动')">
             <table class="slurm-table" data-testid="slurm-table">
-              <thead><tr><th scope="col">{{ t('作业编号') }}</th><th scope="col">{{ t('分区') }}</th><th scope="col">{{ t('作业名称') }}</th><th scope="col">{{ t('用户') }}</th><th scope="col">{{ t('状态') }}</th><th scope="col">{{ t('已运行时间') }}</th><th scope="col">{{ t('GPU 编号') }}</th><th scope="col">{{ t('节点列表') }}</th><th scope="col">{{ t('原因') }}</th><th scope="col">{{ t('权重') }}</th><th scope="col"><div class="slurm-row-actions"><span>{{ t('日志') }}</span><span>{{ t('删除') }}</span></div></th></tr></thead>
+              <colgroup>
+                <col class="slurm-col-id" />
+                <col class="slurm-col-partition" />
+                <col class="slurm-col-name" />
+                <col class="slurm-col-user" />
+                <col class="slurm-col-state" />
+                <col class="slurm-col-elapsed" />
+                <col class="slurm-col-gpu" />
+                <col class="slurm-col-nodes" />
+                <col class="slurm-col-reason" />
+                <col class="slurm-col-priority" />
+                <col class="slurm-col-actions" />
+              </colgroup>
+              <thead><tr><th scope="col">{{ t('作业编号') }}</th><th scope="col">{{ t('分区') }}</th><th scope="col">{{ t('作业名称') }}</th><th scope="col">{{ t('用户') }}</th><th scope="col">{{ t('状态') }}</th><th scope="col" class="slurm-elapsed">{{ t('已运行时间') }}</th><th scope="col" class="slurm-gpu-indices">{{ t('GPU 编号') }}</th><th scope="col">{{ t('节点列表') }}</th><th scope="col">{{ t('原因') }}</th><th scope="col" class="slurm-priority">{{ t('权重') }}</th><th scope="col"><div class="slurm-row-actions"><span>{{ t('日志') }}</span><span>{{ t('删除') }}</span></div></th></tr></thead>
               <tbody><tr v-for="job in slurmPageRows" :key="`${job.cluster || ''}:${job.id}:${job.partition}`">
                 <td class="slurm-job-id"><span :title="job.id">{{ job.id }}</span><small v-if="job.cluster" :title="job.cluster">{{ job.cluster }}</small></td>
                 <td><span class="slurm-cell-text" :title="job.partition">{{ job.partition || '—' }}</span></td>

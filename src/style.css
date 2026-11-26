@@ -370,19 +370,31 @@ button { border: 0; }
 .slurm-scope button { height: 27px; min-width: 54px; padding: 0 13px; border-radius: 14px; font-size: 12px; color: var(--text-secondary); background: transparent; }
 .slurm-scope button:hover:not(:disabled) { color: var(--blue); background: var(--accent-soft); }
 .slurm-scope button.active { color: var(--blue); background: #fff; box-shadow: 0 2px 7px #334b7510; font-weight: 600; }
-.slurm-table-wrap { width: 100%; max-height: 340px; overflow: auto; overscroll-behavior: contain; }
+.slurm-table-wrap { container-type: inline-size; width: 100%; max-height: 340px; overflow: auto; overscroll-behavior: contain; }
 .slurm-table-wrap:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
-.slurm-table { width: 100%; min-width: 1220px; border-collapse: separate; border-spacing: 0; table-layout: fixed; text-align: left; font-size: 12px; color: var(--text-secondary); }
+.slurm-table {
+  --slurm-table-min-width: 1220px;
+  --slurm-table-extra-width: max(0px, 100cqw - var(--slurm-table-min-width));
+  width: 100%; min-width: var(--slurm-table-min-width); border-collapse: separate; border-spacing: 0;
+  table-layout: fixed; text-align: left; font-size: 12px; color: var(--text-secondary);
+}
+/* Base widths total 1220px. Text columns share any additional space. */
+.slurm-col-id { width: 108px; }
+.slurm-col-partition { width: calc(80px + var(--slurm-table-extra-width) * .08); }
+.slurm-col-name { width: calc(164px + var(--slurm-table-extra-width) * .32); }
+.slurm-col-user { width: calc(100px + var(--slurm-table-extra-width) * .12); }
+.slurm-col-state { width: calc(96px + var(--slurm-table-extra-width) * .10); }
+.slurm-col-elapsed { width: 120px; }
+.slurm-col-gpu { width: 92px; }
+.slurm-col-nodes { width: calc(116px + var(--slurm-table-extra-width) * .16); }
+.slurm-col-reason { width: calc(152px + var(--slurm-table-extra-width) * .22); }
+.slurm-col-priority { width: 80px; }
+.slurm-col-actions { width: 112px; }
 .slurm-card-sized .slurm-table { height: 100%; }
 .slurm-table th { position: sticky; top: 0; z-index: 1; padding: 11px 12px; background: var(--surface-soft); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); color: var(--text-subtle); font-size: 11px; font-weight: 500; white-space: nowrap; }
 .slurm-table td { padding: 15px 12px; border-bottom: 1px solid var(--line); vertical-align: middle; line-height: 1.7; }
 .slurm-table th:first-child, .slurm-table td:first-child { padding-left: 24px; }
 .slurm-table th:last-child, .slurm-table td:last-child { padding-right: 18px; }
-.slurm-table th:nth-child(1) { width: 144px; }
-.slurm-table th:nth-child(7) { width: 72px; }
-.slurm-table th:nth-child(9) { width: 180px; }
-.slurm-table th:nth-child(10) { width: 112px; }
-.slurm-table th:nth-child(11) { width: 112px; }
 /* Fixed outer columns keep the selected job and its actions visible while only
    the middle columns scroll. Their opaque backgrounds also cover row content. */
 .slurm-table :is(th, td):first-child { position: sticky; left: 0; border-right: 1px solid var(--line); }
@@ -402,10 +414,11 @@ button { border: 0; }
 .slurm-job-name { display: block; color: var(--text); font-weight: 500; overflow-wrap: anywhere; }
 .slurm-job-state { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 .slurm-job-state .status-dot { width: 5px; height: 5px; }
-.slurm-elapsed { font-variant-numeric: tabular-nums; white-space: nowrap; }
-.slurm-gpu-indices { font-variant-numeric: tabular-nums; }
+.slurm-elapsed, .slurm-gpu-indices { text-align: center; font-variant-numeric: tabular-nums; }
+.slurm-elapsed { white-space: nowrap; }
+.slurm-gpu-indices { overflow-wrap: anywhere; }
 .slurm-job-reason { font-size: 11px; overflow-wrap: anywhere; }
-.slurm-priority { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.slurm-priority { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .slurm-no-action { grid-column: 1 / -1; color: var(--text-subtle); }
 .slurm-row-actions { display: grid; grid-template-columns: repeat(2, 1fr); align-items: center; justify-items: center; gap: 6px; }
 .slurm-log-button { grid-column: 1; }

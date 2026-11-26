@@ -81,6 +81,18 @@ async function cardMetrics(page) {
   });
 }
 
+async function measureColumns(table) {
+  return table.evaluate(element => {
+    const headers = [...element.tHead.rows[0].cells];
+    const firstRow = [...element.tBodies[0].rows[0].cells];
+    return {
+      widths: headers.map(cell => cell.getBoundingClientRect().width),
+      numericAlignments: [headers, firstRow].map(row => [5, 6, 9].map(index => getComputedStyle(row[index]).textAlign)),
+      elapsedFits: firstRow[5].scrollWidth <= firstRow[5].clientWidth,
+    };
+  });
+}
+
 async function expectCardHeight(page, expected, description) {
   await page.waitForFunction(height => {
     const card = document.querySelector('[data-testid="slurm-card"]');
@@ -494,11 +506,16 @@ async function verifyPersistentRestart(errors) {
     await page.goto(fixtureUrl);
     const card = page.getByTestId('slurm-card');
     await card.waitFor();
-    const headers = page.getByTestId('slurm-table').locator('th');
+    const table = page.getByTestId('slurm-table');
+    const headers = table.locator('th');
     assert.deepEqual(await headers.allTextContents(), ['作业编号', '分区', '作业名称', '用户', '状态', '已运行时间', 'GPU 编号', '节点列表', '原因', '权重', '日志删除']);
     assert.deepEqual(await headers.last().locator('span').allTextContents(), ['日志', '删除']);
     assert.equal(await card.locator('tbody tr').count(), 3);
-    assert.deepEqual(await card.locator('.slurm-gpu-indices').allTextContents(), ['0, 2, 5', '—', '—']);
+    assert.deepEqual(await card.locator('td.slurm-gpu-indices').allTextContents(), ['0, 2, 5', '—', '—']);
+    const compactColumns = await measureColumns(table);
+    assert.deepEqual(compactColumns.widths.map(Math.round), [108, 80, 164, 100, 96, 120, 92, 116, 152, 80, 112]);
+    assert.deepEqual(compactColumns.numericAlignments, [['center', 'center', 'right'], ['center', 'center', 'right']]);
+    assert(compactColumns.elapsedFits, 'multi-day elapsed time fits at the minimum table width');
     const longName = card.locator('.slurm-job-name').nth(1);
     assert.equal(await longName.textContent(), 'very_long_training_experiment_name_for_array_jobs');
     assert(await longName.evaluate(name => {
@@ -586,6 +603,10 @@ async function verifyPersistentRestart(errors) {
     await page.getByTestId('theme-dark').click();
     await page.waitForFunction(() => document.documentElement.dataset.theme === 'dark');
     await page.setViewportSize({ width: 1920, height: 1080 });
+    const wideColumns = await measureColumns(table);
+    const growth = wideColumns.widths.map((width, index) => Math.round(width - compactColumns.widths[index]));
+    assert.deepEqual([growth[5], growth[6], growth[9]], [0, 0, 0], 'numeric columns keep their widths');
+    assert(growth[2] > growth[8] && growth[8] > growth[7] && growth[7] > 0, 'extra space prioritizes job name, reason and node list');
     await logButton.click();
     assert.equal(await logDialog.getByRole('button', { name: '.err' }).getAttribute('aria-pressed'), 'true');
     assert.equal(await logDialog.getByRole('checkbox').isChecked(), true);
