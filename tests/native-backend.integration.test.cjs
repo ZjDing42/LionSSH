@@ -10,7 +10,7 @@ const { createPrivateKey } = require('node:crypto');
 const { ServiceHarness } = require('./helpers/service-harness.cjs');
 const { localSshServer, echoServer, freePort, roundTrip } = require('./helpers/local-ssh.cjs');
 const { profile, tunnel, delay } = require('./helpers/fixtures.cjs');
-const { mineQueue, allQueue, queueCommand, mineQueueCommand, runningJobName } = require('./helpers/slurm-output.cjs');
+const { mineQueue, allQueue, queueCommand, gpuQueueCommand, mineQueueCommand, runningJobName } = require('./helpers/slurm-output.cjs');
 const { makeSummary, cards: summaryCards } = require('./helpers/nvidia-summary.cjs');
 const commands = require('./fixtures/commands.json');
 const packageInfo = require('../package.json');
@@ -302,6 +302,11 @@ test('Slurm scopes, priority, owner rechecks, injected identifiers and one-use c
   const { backend, ssh } = await fixture(t, {
     squeueResponse: command => (command === queueCommand ? allQueue : mineQueue)
       .replace('3427|', `${priority}|`).replace(cancelled ? /^.*4201.*\n/m : /$^/, ''),
+    squeueGpuResponse: JSON.stringify({ jobs: [
+      { job_id: 4201, user_name: 'tester', gres_detail: ['gpu:a100:4(IDX:5,0,2-3),nic:1(IDX:7)', 'gpu:a100:1(IDX:2)'] },
+      { job_id: 4202, user_name: 'tester', gres_detail: ['gpu:1(IDX:4)'] },
+      { job_id: 4203, user_name: 'another', gres_detail: [] },
+    ] }),
     jobResponse: command => {
       if (command === commands.jobs['4201'].info) return jobRecord('4201', owner);
       if (command === commands.jobs['4203'].info) return jobRecord('4203', 'another');
@@ -312,12 +317,15 @@ test('Slurm scopes, priority, owner rechecks, injected identifiers and one-use c
   const input = profile(ssh, { autoReconnect: false }); await connect(backend, input);
   const mine = await monitors(backend, input.id);
   assert.ok(ssh.stats.slurmCommands.includes(mineQueueCommand));
+  assert.ok(ssh.stats.slurmCommands.includes(`${gpuQueueCommand} -u tester`));
   assert.deepEqual(mine.slurm.jobs.map(job => job.priority), [3427, 0]);
+  assert.deepEqual(mine.slurm.jobs.map(job => job.gpuIndices), [[0, 2, 3, 5], undefined]);
   assert.equal(mine.slurm.jobs[0].name, runningJobName);
   await backend.invoke('set-slurm-scope', input.id, 'all');
   const all = await backend.state(input.id, value => value.slurm.scope === 'all' && value.slurm.jobs.length === 3, 'all Slurm jobs');
   assert.ok(ssh.stats.slurmCommands.includes(queueCommand));
   assert.deepEqual(all.slurm.jobs.map(job => job.priority), [3427, 0, 98765]);
+  assert.deepEqual(all.slurm.jobs.map(job => job.gpuIndices), [[0, 2, 3, 5], undefined, undefined]);
   priority = 4381;
   await backend.state(input.id, value => value.slurm.jobs[0]?.priority === 4381, 'automatic Slurm priority refresh', 36_000);
   assert.deepEqual(ssh.stats.jobCommands, [], 'automatic priority refresh only uses the scheduled queue query');

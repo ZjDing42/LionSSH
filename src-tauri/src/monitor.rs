@@ -7,7 +7,7 @@ use crate::ssh::Executor;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use regex::Regex;
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{
     atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     Arc,
@@ -391,10 +391,11 @@ fn summarize_gpu(
 // Put the unbounded job name last so spaces and delimiters in the name survive.
 const SQUEUE_COMMAND: &str = "squeue -o '%Q|%i|%P|%u|%t|%M|%D|%R|%j'";
 const SQUEUE_HEADER: &str = "PRIORITY|JOBID|PARTITION|USER|ST|TIME|NODES|NODELIST(REASON)|NAME";
+const SQUEUE_GPU_COMMAND: &str = "squeue --local --json -t RUNNING,COMPLETING,SUSPENDED,CONFIGURING";
 
-fn squeue_command(username: &str, scope: &str) -> Result<String, String> {
+fn slurm_queue_command(command: &str, username: &str, scope: &str) -> Result<String, String> {
     if scope == "all" {
-        return Ok(SQUEUE_COMMAND.into());
+        return Ok(command.into());
     }
     if scope != "mine" {
         return Err("作业查询范围不正确".into());
@@ -410,7 +411,84 @@ fn squeue_command(username: &str, scope: &str) -> Result<String, String> {
     } else {
         quote(username)
     };
-    Ok(format!("{SQUEUE_COMMAND} -u {value}"))
+    Ok(format!("{command} -u {value}"))
+}
+fn squeue_command(username: &str, scope: &str) -> Result<String, String> {
+    slurm_queue_command(SQUEUE_COMMAND, username, scope)
+}
+
+fn slurm_json_number(value: &Value) -> Option<u64> {
+    if value["set"] == true && value["infinite"] != true {
+        value["number"].as_u64()
+    } else {
+        value.as_u64()
+    }
+}
+
+fn slurm_gpu_job_id(record: &Value) -> Option<String> {
+    if let Some(array) = slurm_json_number(&record["array_job_id"]).filter(|id| *id > 0) {
+        return Some(format!(
+            "{array}_{}",
+            slurm_json_number(&record["array_task_id"])?
+        ));
+    }
+    if let Some(heterogeneous) = slurm_json_number(&record["het_job_id"]).filter(|id| *id > 0) {
+        return Some(format!(
+            "{heterogeneous}+{}",
+            slurm_json_number(&record["het_job_offset"])?
+        ));
+    }
+    Some(slurm_json_number(&record["job_id"])?.to_string())
+}
+
+fn apply_slurm_gpu_indices(output: &str, jobs: &mut [Value]) {
+    let Ok(data) = serde_json::from_str::<Value>(output) else {
+        return;
+    };
+    let Some(records) = data["jobs"].as_array() else {
+        return;
+    };
+    let gres = re(r"(?:^|,)\s*(?:gres/)?gpu:[^,()]*\(IDX:([0-9,-]+)\)");
+    let allocations: HashMap<_, _> = records
+        .iter()
+        .filter_map(|record| {
+            let id = slurm_gpu_job_id(record)?;
+            let user = record["user_name"].as_str()?;
+            let mut indices = BTreeSet::new();
+            for detail in record["gres_detail"].as_array()?.iter().filter_map(Value::as_str) {
+                for entry in gres.captures_iter(detail) {
+                    for item in entry[1].split(',') {
+                        let (first, last) = item.split_once('-').unwrap_or((item, item));
+                        if let (Ok(first), Ok(last)) = (first.parse::<u32>(), last.parse::<u32>()) {
+                            // A real GPU inventory is small. Bound ranges before expanding them.
+                            if last < 4096 {
+                                indices.extend(first..=last);
+                            }
+                        }
+                    }
+                }
+            }
+            Some(((id, user), (record["cluster"].as_str(), indices)))
+        })
+        .collect();
+    for row in jobs.iter_mut().filter(|row| has_slurm_allocation(row)) {
+        let (Some(id), Some(user)) = (row["id"].as_str(), row["user"].as_str()) else {
+            continue;
+        };
+        if let Some((cluster, indices)) = allocations.get(&(id.to_owned(), user)) {
+            let same_cluster = row["cluster"].as_str().is_none_or(|name| Some(name) == *cluster);
+            if same_cluster && !indices.is_empty() {
+                row["gpuIndices"] = json!(indices);
+            }
+        }
+    }
+}
+
+fn has_slurm_allocation(row: &Value) -> bool {
+    matches!(
+        row["stateCode"].as_str(),
+        Some("R" | "RUNNING" | "CG" | "COMPLETING" | "S" | "SUSPENDED" | "CF" | "CONFIGURING")
+    )
 }
 fn translate_state(code: &str) -> (&'static str, &'static str) {
     let code = code.to_uppercase();
@@ -1792,7 +1870,7 @@ impl Monitor {
         let username = text(&*self.profile.lock().await, "username");
         let command = squeue_command(&username, &scope);
         let mut query_succeeded = false;
-        let result = match command {
+        let mut result = match command {
             Ok(command) => match self.exec(&command, false).await {
                 Ok(output) => {
                     query_succeeded = true;
@@ -1802,6 +1880,17 @@ impl Monitor {
             },
             Err(e) => Err(QueryError::new(e)),
         };
+        if let Ok(jobs) = &mut result {
+            if jobs.iter().any(has_slurm_allocation) {
+                let gpu_command = slurm_queue_command(SQUEUE_GPU_COMMAND, &username, &scope);
+                if let Ok(command) = gpu_command {
+                    // Older Slurm installations may omit GRES allocation details.
+                    if let Ok(output) = self.exec(&command, false).await {
+                        apply_slurm_gpu_indices(&output, jobs);
+                    }
+                }
+            }
+        }
         let mut state = self.slurm.lock().await;
         // The scope may change while this response waits for the state lock.
         if self.cancel.is_cancelled() || epoch != self.slurm_epoch.load(Ordering::SeqCst) {
@@ -3011,12 +3100,13 @@ mod tests {
         assert!(executor.commands.lock().await.is_empty());
         assert!(monitor.initialize_slurm_scope("invalid").await.is_err());
         monitor.refresh_slurm().await;
-        assert_eq!(executor.commands.lock().await.as_slice(), &[SQUEUE_COMMAND]);
+        assert_eq!(executor.commands.lock().await.as_slice(), &[SQUEUE_COMMAND, SQUEUE_GPU_COMMAND]);
     }
     #[tokio::test]
     async fn slurm_scope_change_retains_capability_but_clears_old_scope_results() {
         let (monitor, executor) = harness().await;
         let previous = monitor.slurm.lock().await.clone();
+        let previous_commands = executor.commands.lock().await.len();
         assert_eq!(previous["availability"], "available");
         assert!(!previous["jobs"].as_array().unwrap().is_empty());
         assert!(previous["lastUpdated"].is_u64());
@@ -3030,7 +3120,7 @@ mod tests {
         assert_eq!(state["jobs"], json!([]));
         assert!(state["lastUpdated"].is_null());
         assert!(state["nextPollAt"].is_null());
-        assert_eq!(executor.commands.lock().await.len(), 1);
+        assert_eq!(executor.commands.lock().await.len(), previous_commands);
     }
     #[tokio::test]
     async fn slurm_response_waiting_for_state_lock_cannot_overwrite_new_scope() {

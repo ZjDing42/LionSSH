@@ -93,7 +93,7 @@ const jobCancellation = ref<{
     jobName: string;
     preview: JobCancelPreview;
 } | null>(null);
-const jobLog = ref<{ profileId: string; jobId: string; jobName: string } | null>(null);
+const jobLog = ref<{ profileId: string; jobId: string } | null>(null);
 let jobLogTrigger: HTMLButtonElement | null = null;
 const tmpCleanup = ref<{
     profileId: string;
@@ -332,13 +332,12 @@ watch([slurmInitialLoading, selectedId], ([isLoading, id], [, previousId]) => {
 const slurmMinimumHeight = computed(() => slurmCardHeight.value === null && slurmInitialLoading.value
     ? Math.max(slurmMinHeight, slurmLoadingHeight.value || 0) : slurmMinHeight);
 const slurmJobs = computed(() => slurm.value?.scope === slurmScope.value ? slurm.value.jobs : []);
-watch([selectedId, page, connected, shutdown, slurm], ([id, view, isConnected, shuttingDown, queue]) => {
+const slurmLogJobs = computed(() => slurmJobs.value.filter(canReadJobLog));
+watch([selectedId, page, connected, shutdown], ([id, view, isConnected, shuttingDown]) => {
     const target = jobLog.value;
     if (!target) return;
     if (id !== target.profileId || view !== 'workspace' || !isConnected || shuttingDown) {
         closeJobLog(false);
-    } else if (queue?.status === 'ready' && !queue.jobs.some(job => job.id === target.jobId && canReadJobLog(job))) {
-        closeJobLog();
     }
 });
 const slurmPageCount = computed(() => Math.max(1, Math.ceil(slurmJobs.value.length / slurmPageSize)));
@@ -620,7 +619,7 @@ function canReadJobLog(job: SlurmJob): boolean {
 function openJobLog(job: SlurmJob, event: MouseEvent) {
     if (!selected.value || !connected.value || !canReadJobLog(job)) return;
     jobLogTrigger = event.currentTarget as HTMLButtonElement;
-    jobLog.value = { profileId: selected.value.id, jobId: job.id, jobName: job.name };
+    jobLog.value = { profileId: selected.value.id, jobId: job.id };
 }
 function closeJobLog(restoreFocus = true) {
     jobLog.value = null;
@@ -1205,7 +1204,7 @@ onUnmounted(() => { cancelConnectionTest(); disposed = true; clearInterval(clock
           <div v-if="slurmInitialLoading" class="slurm-empty" data-testid="slurm-loading" role="status"><Icon name="refresh" :size="19" class="spinning" /><span>{{ t(slurmScope === 'mine' ? '正在读取个人作业…' : '正在读取全部作业…') }}</span></div>
           <div v-else-if="slurmJobs.length" class="slurm-table-wrap" tabindex="0" role="region" :aria-label="t('Slurm 作业列表，可横向滚动')">
             <table class="slurm-table" data-testid="slurm-table">
-              <thead><tr><th scope="col">{{ t('作业编号') }}</th><th scope="col">{{ t('分区') }}</th><th scope="col">{{ t('作业名称') }}</th><th scope="col">{{ t('用户') }}</th><th scope="col">{{ t('状态') }}</th><th scope="col">{{ t('已运行时间') }}</th><th scope="col">{{ t('节点数') }}</th><th scope="col">{{ t('节点列表') }}</th><th scope="col">{{ t('原因') }}</th><th scope="col">{{ t('权重') }}</th><th scope="col"><div class="slurm-row-actions"><span>{{ t('日志') }}</span><span>{{ t('删除') }}</span></div></th></tr></thead>
+              <thead><tr><th scope="col">{{ t('作业编号') }}</th><th scope="col">{{ t('分区') }}</th><th scope="col">{{ t('作业名称') }}</th><th scope="col">{{ t('用户') }}</th><th scope="col">{{ t('状态') }}</th><th scope="col">{{ t('已运行时间') }}</th><th scope="col">{{ t('GPU 编号') }}</th><th scope="col">{{ t('节点列表') }}</th><th scope="col">{{ t('原因') }}</th><th scope="col">{{ t('权重') }}</th><th scope="col"><div class="slurm-row-actions"><span>{{ t('日志') }}</span><span>{{ t('删除') }}</span></div></th></tr></thead>
               <tbody><tr v-for="job in slurmPageRows" :key="`${job.cluster || ''}:${job.id}:${job.partition}`">
                 <td class="slurm-job-id"><span :title="job.id">{{ job.id }}</span><small v-if="job.cluster" :title="job.cluster">{{ job.cluster }}</small></td>
                 <td><span class="slurm-cell-text" :title="job.partition">{{ job.partition || '—' }}</span></td>
@@ -1213,7 +1212,7 @@ onUnmounted(() => { cancelConnectionTest(); disposed = true; clearInterval(clock
                 <td><span class="slurm-cell-text" :title="job.user">{{ job.user || '—' }}</span></td>
                 <td><span class="slurm-job-state" :class="job.stateTone" :title="slurmStateTitle(job)"><i class="status-dot" :class="job.stateTone" />{{ message(job.stateLabel) }}</span></td>
                 <td class="slurm-elapsed">{{ job.elapsed || '—' }}</td>
-                <td class="slurm-node-count">{{ numberText(job.nodes) }}</td>
+                <td class="slurm-gpu-indices">{{ job.gpuIndices?.join(', ') || '—' }}</td>
                 <td><span class="slurm-cell-text" :title="job.nodeList">{{ job.nodeList || '—' }}</span></td>
                 <td class="slurm-job-reason"><span :title="slurmReasonTitle(job)">{{ message(job.reasonLabel) || '—' }}</span></td>
                 <td class="slurm-priority" :data-testid="`job-priority-${job.id}`">{{ job.priority?.toLocaleString() ?? '—' }}</td>
@@ -1252,7 +1251,7 @@ onUnmounted(() => { cancelConnectionTest(); disposed = true; clearInterval(clock
       <form v-else class="drawer-form" @submit.prevent="saveTunnel"><div class="form-body"><div class="form-context"><Icon name="server" :size="16" />{{ selected?.name }}<span>{{ selected?.host }}</span></div><label class="field">{{ t('隧道名称') }}<span class="field-optional">{{ t('可选') }}</span><input v-model="tunnelDraft.name" :placeholder="t('例如：TensorBoard')" maxlength="80" /></label><label class="field">{{ t('转发方向') }}</label><div class="segmented-control"><button type="button" :class="{ active: tunnelDraft.direction === 'local' }" @click="tunnelDraft.direction = 'local'"><Icon name="arrow" :size="16" />{{ t('正向隧道') }}</button><button type="button" :class="{ active: tunnelDraft.direction === 'remote' }" @click="tunnelDraft.direction = 'remote'"><Icon name="exchange" :size="16" />{{ t('反向隧道') }}</button></div><div class="direction-explanation"><span>{{ tunnelDraft.direction === 'local' ? t("本机端口") : t("服务器端口") }}</span><Icon name="arrow" :size="16" /><span>SSH</span><Icon name="arrow" :size="16" /><span>{{ tunnelDraft.direction === 'local' ? t("远端服务") : t("本机侧服务") }}</span></div><div class="form-section-title"><Icon name="link" :size="16" />{{ tunnelDraft.direction === 'local' ? t("本机监听") : t("服务器监听") }}</div><div class="form-row host-row"><label class="field">{{ t('监听地址') }}<input v-model="tunnelDraft.bindHost" placeholder="127.0.0.1" required maxlength="255" /></label><label class="field">{{ t('监听端口') }}<input v-model.number="tunnelDraft.bindPort" type="number" min="1" max="65535" required /></label></div><div class="form-section-title"><Icon name="arrow" :size="16" />{{ tunnelDraft.direction === 'local' ? t("远端目标") : t("本机侧目标") }}</div><div class="form-row host-row"><label class="field">{{ t('目标地址') }}<input v-model="tunnelDraft.targetHost" placeholder="127.0.0.1" required maxlength="255" /></label><label class="field">{{ t('目标端口') }}<input v-model.number="tunnelDraft.targetPort" type="number" min="1" max="65535" required /></label></div><label class="field inline-field">{{ t('连通性检测间隔') }}<div><input v-model.number="tunnelDraft.healthIntervalSec" type="number" min="5" max="300" required /><span>{{ t('秒') }}</span></div></label><label class="checkbox-row"><input v-model="tunnelDraft.enabled" type="checkbox" /><span>{{ t('启用这条隧道') }}<small>{{ t('设备连接后自动建立；手动暂停后不会自动重启。') }}</small></span></label><div class="form-note"><Icon name="info" :size="17" /><span>{{ tunnelDraft.direction === 'remote' ? t("远端监听地址能否对外访问取决于服务器的转发权限。无法探测完整路径时，状态会显示未验证。") : t("目标地址从服务器一侧访问。目标服务未启动时会提示不可用，并继续检测。") }}</span></div><div v-if="formError" class="form-error" role="alert">{{ message(formError) }}</div></div><div class="drawer-footer"><button type="button" class="button secondary" @click="closeDrawer()">{{ t('取消') }}</button><button type="submit" data-testid="tunnel-save" class="button primary" :disabled="busy.save">{{ busy.save ? t("正在保存") : t("保存隧道") }}<Icon name="check" :size="16" /></button></div></form>
     </section></div></Transition>
 
-  <SlurmLogDialog v-if="jobLog && api" :api="api" :profile-id="jobLog.profileId" :job-id="jobLog.jobId" :job-name="jobLog.jobName" @close="closeJobLog()" />
+  <SlurmLogDialog v-if="jobLog && api" :api="api" :profile-id="jobLog.profileId" :initial-job-id="jobLog.jobId" :jobs="slurmLogJobs" @close="closeJobLog()" />
 
   <div v-if="credentialProfile" class="modal-backdrop" @click.self="credentialProfile = null"><form class="modal credential-modal" role="dialog" aria-modal="true" aria-labelledby="credential-title" @submit.prevent="submitCredentials"><div class="modal-top"><span class="modal-icon blue"><Icon name="key" :size="25" /></span><button class="icon-button" type="button" :aria-label="t('关闭认证')" @click="credentialProfile = null"><Icon name="close" :size="19" /></button></div><h2 id="credential-title">{{ t('连接') }} {{ credentialProfile.name }}</h2><p>{{ credentialProfile.username }}@{{ credentialProfile.host }}:{{ credentialProfile.port }}</p><label v-if="credentialProfile.authType === 'password'" class="field">{{ t('连接密码') }}<input v-model="credentialPassword" type="password" :placeholder="t('输入密码，或留空使用已记住的密码')" autocomplete="current-password" /></label><label v-else class="field">{{ t('密钥口令') }}<input v-model="credentialPassphrase" type="password" :placeholder="t('未加密私钥可留空')" autocomplete="current-password" /></label><label class="checkbox-row"><input v-model="credentialRemember" type="checkbox" /><span>{{ t('使用系统加密记住凭据') }}</span></label><div v-for="(hop, index) in credentialProfile.jumpHosts || []" :key="hop.id" class="credential-hop"><strong>{{ t('跳板机 {n}', { n: index + 1 }) }} · {{ hop.username }}@{{ hop.host }}</strong><label class="field">{{ t(hop.authType === 'password' ? '连接密码' : '密钥口令') }}<input v-if="hop.authType === 'password'" v-model="credentialJumpSecrets[hop.id]!.password" type="password" :placeholder="t('输入密码，或留空使用已记住的密码')" autocomplete="current-password" /><input v-else v-model="credentialJumpSecrets[hop.id]!.passphrase" type="password" :placeholder="t('未加密私钥可留空')" autocomplete="current-password" /></label><label class="checkbox-row"><input v-model="credentialJumpSecrets[hop.id]!.remember" type="checkbox" /><span>{{ t('使用系统加密记住凭据') }}</span></label></div><div class="modal-actions"><button type="button" class="button secondary" @click="credentialProfile = null">{{ t('取消') }}</button><button type="submit" class="button primary"><Icon name="link" :size="16" />{{ t('连接') }}</button></div></form></div>
   <div v-if="deleting" class="modal-backdrop" @click.self="!busy.delete && (deleting = null)"><section class="modal confirm-modal" role="alertdialog" aria-modal="true" aria-labelledby="delete-title"><span class="modal-icon red"><Icon name="trash" :size="25" /></span><h2 id="delete-title">{{ t(deleting.kind === 'device' ? '移除设备？' : '移除隧道？') }}</h2><p>{{ t(deleting.kind === 'device' ? '「{name}」的连接会先关闭，然后移除设备配置。' : '「{name}」的转发会先停止，然后移除隧道配置。', { name: deleting.name }) }}</p><div class="modal-actions"><button class="button secondary" :disabled="busy.delete" @click="deleting = null">{{ t('取消') }}</button><button class="button danger" :disabled="busy.delete" @click="deleteConfirmed()">{{ busy.delete ? t("正在移除") : t("确认移除") }}</button></div></section></div>

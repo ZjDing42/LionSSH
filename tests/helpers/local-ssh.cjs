@@ -7,7 +7,7 @@ const path = require('node:path');
 const { generateKeyPairSync, createHash } = require('node:crypto');
 const { Server, utils } = require('ssh2');
 const { summaryFixture } = require('./nvidia-summary.cjs');
-const { queueCommand } = require('./slurm-output.cjs');
+const { queueCommand, gpuQueueCommand } = require('./slurm-output.cjs');
 const commandFixtures = require('../fixtures/commands.json');
 const allowedStorageCommands = new Set(Object.values(commandFixtures.storage));
 const allowedJobCommands = new Set(Object.values(commandFixtures.jobs).flatMap(Object.values));
@@ -258,9 +258,11 @@ async function localSshServer(options = {}) {
             return;
           }
           if (/^squeue(?:\s|$)/.test(info.command)) {
+            const gpuQuery = info.command.startsWith(gpuQueueCommand);
+            const baseCommand = gpuQuery ? gpuQueueCommand : queueCommand;
             stats.slurmCommands.push(info.command);
-            const scopeArgument = info.command.slice(queueCommand.length);
-            if (!info.command.startsWith(queueCommand) || (scopeArgument && !/^ -u [\w.@-]+\$?$/.test(scopeArgument))) {
+            const scopeArgument = info.command.slice(baseCommand.length);
+            if (!info.command.startsWith(baseCommand) || (scopeArgument && !/^ -u [\w.@-]+\$?$/.test(scopeArgument))) {
               stats.rejectedCommands.push(info.command);
               return reject();
             }
@@ -268,7 +270,8 @@ async function localSshServer(options = {}) {
             stream.on('error', () => {});
             stats.lifecycle.push({ type: 'slurm-query-start', command: info.command });
             stream.once('close', () => stats.lifecycle.push({ type: 'slurm-query-close', command: info.command }));
-            const response = typeof squeueResponse === 'function' ? squeueResponse(info.command, stats) : squeueResponse;
+            const fixture = gpuQuery ? options.squeueGpuResponse ?? '{"jobs":[]}' : squeueResponse;
+            const response = typeof fixture === 'function' ? fixture(info.command, stats) : fixture;
             writeResponse(stream, response ?? { stderr: 'squeue: command not found\n', exitCode: 127 });
             return;
           }

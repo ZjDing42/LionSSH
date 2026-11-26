@@ -87,6 +87,7 @@ export interface SlurmJob {
   stateTone: 'positive' | 'pending' | 'negative' | 'neutral';
   elapsed: string;
   nodes: number | null;
+  gpuIndices?: number[];
   nodeList: string;
   reasonCode: string;
   reasonLabel: string;

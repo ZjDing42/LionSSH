@@ -20,7 +20,7 @@ async function installMockApi(page) {
       tunnels: [], events: [],
     };
     const ownJobs = [
-      { id: '167981', partition: 'gpu', name: 'train_model', user: 'user', stateCode: 'R', stateLabel: '运行中', stateTone: 'positive', elapsed: '2-03:11:05', nodes: 1, nodeList: 'gpu01', reasonCode: '', reasonLabel: '' },
+      { id: '167981', partition: 'gpu', name: 'train_model', user: 'user', stateCode: 'R', stateLabel: '运行中', stateTone: 'positive', elapsed: '2-03:11:05', nodes: 1, gpuIndices: [0, 2, 5], nodeList: 'gpu01', reasonCode: '', reasonLabel: '' },
       { id: '167986_[1-40%4]', partition: 'gpu-long', name: 'very_long_training_experiment_name_for_array_jobs', user: 'user', stateCode: 'PD', stateLabel: '排队中', stateTone: 'pending', elapsed: '0:00', nodes: 1, nodeList: '', reasonCode: 'Resources', reasonLabel: '等待可用资源' },
       { id: '167987', partition: 'gpu', name: 'compare', user: 'user', stateCode: 'PD', stateLabel: '排队中', stateTone: 'pending', elapsed: '0:00', nodes: 2, nodeList: '', reasonCode: 'QOSMaxGRESPerUser', reasonLabel: '达到服务质量规定的用户通用资源上限' },
     ];
@@ -43,12 +43,15 @@ async function installMockApi(page) {
           window.__slurmUi.failNextLogRead = false;
           throw new Error('日志读取失败');
         }
+        const delays = window.__slurmUi.logDelays;
+        if (delays?.[jobId]) await new Promise(resolve => setTimeout(resolve, delays[jobId]));
         const progress = Array.from({ length: 80 }, (_, index) =>
           `Training progress: 57%|████████▌      | ${39600 + index * 10}/70000 [18:14<18:39, 27.09it/s, Loss=0.0259231]`).join('\r');
         const data = cursor
           ? `${logReads.length === 3 ? '\n' : ''}appended ${logReads.length}\rprogress update\n`
           : kind === 'stderr' ? `${progress}\rstderr initial\r` : `${kind} initial\n`.repeat(160);
-        const bytes = new TextEncoder().encode(data);
+        const display = jobId === '167981' ? data : `Job ${jobId} ${kind}\n${data}`;
+        const bytes = new TextEncoder().encode(display);
         return { status: 'ready', data: btoa(String.fromCharCode(...bytes)), cursor: { fileId: '1:2', offset: (cursor?.offset ?? 0) + bytes.length }, reset: !cursor, truncated: false, shared: false };
       },
       setSlurmScope: async (_id, scope) => {
@@ -492,9 +495,10 @@ async function verifyPersistentRestart(errors) {
     const card = page.getByTestId('slurm-card');
     await card.waitFor();
     const headers = page.getByTestId('slurm-table').locator('th');
-    assert.deepEqual(await headers.allTextContents(), ['作业编号', '分区', '作业名称', '用户', '状态', '已运行时间', '节点数', '节点列表', '原因', '权重', '日志删除']);
+    assert.deepEqual(await headers.allTextContents(), ['作业编号', '分区', '作业名称', '用户', '状态', '已运行时间', 'GPU 编号', '节点列表', '原因', '权重', '日志删除']);
     assert.deepEqual(await headers.last().locator('span').allTextContents(), ['日志', '删除']);
     assert.equal(await card.locator('tbody tr').count(), 3);
+    assert.deepEqual(await card.locator('.slurm-gpu-indices').allTextContents(), ['0, 2, 5', '—', '—']);
     const longName = card.locator('.slurm-job-name').nth(1);
     assert.equal(await longName.textContent(), 'very_long_training_experiment_name_for_array_jobs');
     assert(await longName.evaluate(name => {
@@ -547,6 +551,10 @@ async function verifyPersistentRestart(errors) {
     await logButton.click();
     const logDialog = page.getByTestId('slurm-log-dialog');
     const logContent = logDialog.locator('.slurm-log-view');
+    assert.equal(await logDialog.getByRole('heading').textContent(), '作业');
+    assert.equal(await logDialog.getByText('仅显示最近的日志内容').count(), 0);
+    assert.equal(await logDialog.getByTestId('slurm-log-job-167981').getAttribute('aria-pressed'), 'true');
+    assert.equal(await logDialog.locator('.slurm-log-jobs button').count(), 1);
     await logDialog.getByText(/stdout initial/).waitFor();
     await logDialog.getByRole('button', { name: '.err' }).click();
     await logDialog.getByText(/stderr initial/).waitFor();
@@ -589,6 +597,31 @@ async function verifyPersistentRestart(errors) {
     await page.keyboard.press('Escape');
     await logButton.click();
     assert.equal(await logDialog.getByRole('checkbox').isChecked(), false, 'an explicit uncheck is restored');
+    await page.evaluate(() => {
+      const { state, send } = window.__slurmUi;
+      state.slurm.jobs = state.slurm.jobs.map(job => job.id === '167987' ? { ...job, stateCode: 'R' } : job);
+      window.__slurmUi.logDelays = { '167981': 580 };
+      send();
+    });
+    const alternate = logDialog.getByTestId('slurm-log-job-167987');
+    await alternate.waitFor();
+    await logDialog.getByRole('checkbox').check();
+    await alternate.click();
+    await logContent.getByText(/Job 167987 stderr/).waitFor();
+    assert.equal(await alternate.getAttribute('aria-pressed'), 'true');
+    assert.equal(await logDialog.getByRole('checkbox').isChecked(), true);
+    await page.waitForFunction(() => window.__slurmUi.logReads.some(read => read.jobId === '167987' && read.cursor));
+    assert((await logContent.textContent()).startsWith('Job 167987 stderr'), 'a late response for the previous job must not overwrite this job');
+    await page.evaluate(() => {
+      const { state, send } = window.__slurmUi;
+      state.slurm.jobs = state.slurm.jobs.map(job => job.id === '167987' ? { ...job, stateCode: 'PD' } : job);
+      send();
+    });
+    await logDialog.getByText('该作业已不在运行中').waitFor();
+    assert.equal(await alternate.count(), 0);
+    await logDialog.getByTestId('slurm-log-job-167981').click();
+    await logContent.getByText(/stderr initial/).waitFor();
+    await logDialog.getByRole('checkbox').uncheck();
     await page.keyboard.press('Escape');
     await page.setViewportSize({ width: 1366, height: 1000 });
     assert.equal(await card.getByText('colleague', { exact: true }).count(), 1);

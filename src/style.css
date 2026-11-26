@@ -402,7 +402,8 @@ button { border: 0; }
 .slurm-job-name { display: block; color: var(--text); font-weight: 500; overflow-wrap: anywhere; }
 .slurm-job-state { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 .slurm-job-state .status-dot { width: 5px; height: 5px; }
-.slurm-elapsed, .slurm-node-count { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.slurm-elapsed { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.slurm-gpu-indices { font-variant-numeric: tabular-nums; }
 .slurm-job-reason { font-size: 11px; overflow-wrap: anywhere; }
 .slurm-priority { font-variant-numeric: tabular-nums; white-space: nowrap; }
 .slurm-no-action { grid-column: 1 / -1; color: var(--text-subtle); }
@@ -543,14 +544,20 @@ button { border: 0; }
 .slurm-log-backdrop { padding-inline: clamp(16px, 3vw, 64px); }
 .modal.slurm-log-modal { display: flex; flex-direction: column; gap: 12px; width: 100%; height: min(86vh, 1000px); padding: 20px 24px; overflow: hidden; }
 .slurm-log-header { display: flex; align-items: center; justify-content: space-between; gap: 10px 18px; flex-wrap: wrap; }
-.slurm-log-heading { display: grid; min-width: 0; gap: 3px; }
-.slurm-log-heading h2 { margin: 0; overflow-wrap: anywhere; }
-.slurm-log-heading > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-subtle); font-size: 12px; }
+.slurm-log-header h2 { margin: 0; }
 .slurm-log-controls { display: flex; align-items: center; gap: 10px; margin-left: auto; }
 .slurm-log-controls .checkbox-row { margin: 0; white-space: nowrap; }
 .slurm-log-controls .segmented-control { margin: 0; }
 .slurm-log-controls .segmented-control > button { min-width: 46px; height: 27px; padding: 0 6px; font-family: 'Cascadia Code', Consolas, monospace; }
-.slurm-log-notes { display: flex; gap: 6px 16px; flex-wrap: wrap; color: var(--text-subtle); font-size: 12px; }
+.slurm-log-layout { display: grid; grid-template-columns: clamp(156px, 18vw, 248px) minmax(0, 1fr); gap: 12px; flex: 1; min-height: 0; }
+.slurm-log-jobs { display: flex; flex-direction: column; gap: 4px; overflow: auto; overscroll-behavior: contain; padding: 5px; border: 1px solid var(--line); border-radius: 9px; }
+.slurm-log-jobs > .slurm-log-status { padding: 9px; }
+.slurm-log-job { flex: none; display: grid; gap: 3px; text-align: left; padding: 9px 10px; border-radius: 6px; background: transparent; color: var(--text); overflow-wrap: anywhere; }
+.slurm-log-job:hover, .slurm-log-job[aria-pressed='true'] { background: var(--accent-soft); color: var(--blue); }
+.slurm-log-job strong { font-size: 13px; font-weight: 600; }
+.slurm-log-job span { color: var(--text-subtle); font-size: 11px; font-variant-numeric: tabular-nums; }
+.slurm-log-output { display: flex; flex-direction: column; gap: 6px; min-height: 0; min-width: 0; }
+.slurm-log-notes { color: var(--text-subtle); font-size: 12px; }
 .slurm-log-view { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 14px 16px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-soft); }
 .slurm-log-text { width: max-content; margin: 0; white-space: pre; tab-size: 4; font: 14px/1.6 'Cascadia Code', Consolas, monospace; color: var(--text); }
 .slurm-log-status { color: var(--text-subtle); font-size: 12px; }
