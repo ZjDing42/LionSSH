@@ -16,7 +16,7 @@ const output = path.join(root, 'test-output');
   try {
     await page.addInitScript(() => {
       const profile = { id: 'renderer-actions', name: '作业测试服务器', host: '127.0.0.1', port: 22, username: 'tester', authType: 'key', keyPath: 'test-key', autoReconnect: true, gpu: { enabled: true, intervalSec: 5, idleUtil: 5, idleMemoryMiB: 512, stableSamples: 2 }, tunnels: [] };
-      const job = (id, user) => ({ id, partition: 'gpu', name: user === 'tester' ? '我的训练' : '他人的训练', user, stateCode: 'R', stateLabel: '运行中', stateTone: 'positive', elapsed: '1:20:30', nodes: 1, nodeList: 'gpu01', reasonCode: '', reasonLabel: '' });
+      const job = (id, user) => ({ id, partition: 'gpu', name: user === 'tester' ? '我的训练' : '他人的训练', user, stateCode: 'R', stateLabel: '运行中', stateTone: 'positive', elapsed: '1:20:30', nodes: 1, nodeList: 'gpu01', reasonCode: '', reasonLabel: '', priority: id === '4101' ? 43000 : 0 });
       const state = { profileId: profile.id, status: 'connected', gpu: { status: 'ready', availability: 'available', cards: [{ index: 0, uuid: 'GPU-1', name: 'NVIDIA RTX 4090', memoryTotalMiB: 24576, memoryUsedMiB: 0, utilization: 0, computeProcesses: [], idle: true, stableCount: 2 }], idleCount: 1, total: 1, intervalSec: 5, lastUpdated: Date.now(), nextPollAt: Date.now() + 5000 }, slurm: { availability: 'available', status: 'ready', scope: 'all', jobs: [job('4101', 'tester'), job('4102', 'another')], lastUpdated: Date.now(), intervalSec: 30 }, storage: { status: 'ready', homePath: '/home/tester', homeBytes: 1024 ** 3 * 2, tmpBytes: 1024 ** 2 * 32, totalBytes: 1024 ** 3 * 2 + 1024 ** 2 * 32, intervalSec: 300, lastUpdated: Date.now() }, tunnels: [], events: [] };
       let onState = () => {};
       let onTheme = () => {};
@@ -29,7 +29,7 @@ const output = path.join(root, 'test-output');
       const calls = [];
       const clone = value => JSON.parse(JSON.stringify(value));
       const record = name => calls.push(name);
-      window.mock = { calls, state, hostTrust: [], expire: false, failPriority: false, update, setUpdate: patch => { Object.assign(update, patch); onUpdate(clone(update)); }, emit: () => onState(clone(state)), requestHostKey: () => { state.status = 'awaiting-trust'; onState(clone(state)); onHostKey(clone(hostKey)); }, failBackend: () => onBackendError({ message: '本地连接服务已退出，请重新启动应用。' }) };
+      window.mock = { calls, state, hostTrust: [], expire: false, update, setUpdate: patch => { Object.assign(update, patch); onUpdate(clone(update)); }, emit: () => onState(clone(state)), requestHostKey: () => { state.status = 'awaiting-trust'; onState(clone(state)); onHostKey(clone(hostKey)); }, failBackend: () => onBackendError({ message: '本地连接服务已退出，请重新启动应用。' }) };
       const backend = {
         getInitial: async () => {
           if (window.mock.eventRegistrations.length !== 7) throw Error('Initial snapshot requested before all native listeners were installed');
@@ -57,7 +57,6 @@ const output = path.join(root, 'test-output');
         setSlurmScope: async (_id, scope) => { record('setSlurmScope'); state.slurm.scope = scope; state.slurm.jobs = scope === 'mine' ? [job('4101', 'tester')] : [job('4101', 'tester'), job('4102', 'another')]; onState(clone(state)); },
         prepareJobCancel: async (_id, jobId) => { record('prepareJobCancel'); return { jobId, owner: 'tester', token: 'job-token', expiresAt: Date.now() + (window.mock.expire ? -1000 : 60000) }; },
         cancelJob: async (_id, jobId, token) => { if (token !== 'job-token') throw Error('Invalid token'); record('cancelJob'); state.slurm.jobs = state.slurm.jobs.filter(job => job.id !== jobId); onState(clone(state)); return { jobId, cancelled: true }; },
-        getJobPriority: async (_id, jobId) => { record('getJobPriority'); if (window.mock.failPriority) throw Error('权重读取失败'); return { jobId, priority: jobId === '4101' ? 43000 : 0 }; },
         prepareTmpCleanup: async () => { record('prepareTmpCleanup'); return { username: 'tester', uid: 1001, root: '/tmp', fileCount: 3, bytes: 32 * 1024 ** 2, token: 'tmp-token', expiresAt: Date.now() + (window.mock.expire ? -1000 : 60000) }; },
         cleanupTmp: async (_id, token) => { if (token !== 'tmp-token') throw Error('Invalid token'); record('cleanupTmp'); state.storage.tmpBytes = 0; state.storage.totalBytes = state.storage.homeBytes; onState(clone(state)); return { deletedCount: 3, cleanupStatus: 'complete' }; },
       };
@@ -136,11 +135,9 @@ const output = path.join(root, 'test-output');
     assert.equal((await calls()).filter(call => call === 'openUpdateDownload').length, 1, 'unsupported local builds open the fixed release page');
     await page.evaluate(() => window.mock.setUpdate({ status: 'idle', version: null, error: null }));
     await updateButton.waitFor({ state: 'hidden' });
-    await page.getByTestId('job-priority-query-4101').click();
-    await page.getByTestId('job-priority-4101').waitFor();
-    assert.equal(await page.getByTestId('job-priority-4101').innerText(), '43,000');
-    await page.getByTestId('job-priority-query-4102').click();
-    await page.getByTestId('job-priority-4102').waitFor();
+    const priority = page.getByTestId('job-priority-4101');
+    assert.equal(await priority.innerText(), '43,000');
+    assert.equal(await priority.getByRole('button').count(), 0, 'priority is plain text');
     assert.equal(await page.getByTestId('job-priority-4102').innerText(), '0', 'zero priority is a valid value');
     await page.getByTestId('job-cancel-4101').click();
     await page.getByTestId('job-cancel-confirmation').waitFor();
@@ -184,7 +181,7 @@ const output = path.join(root, 'test-output');
     await page.evaluate(() => { window.mock.state.status = 'disconnected'; window.mock.emit(); });
     assert.equal(await page.getByTestId('tmp-cleanup').isDisabled(), true);
     await page.evaluate(() => { window.mock.state.status = 'connected'; window.mock.state.slurm.jobs.unshift({ id: '4101', partition: 'gpu', name: '我的训练', user: 'tester', stateCode: 'R', stateLabel: '运行中', stateTone: 'positive', elapsed: '1:20:30', nodes: 1, nodeList: 'gpu01', reasonCode: '', reasonLabel: '' }); window.mock.state.storage.homeBytes = 2 * 1024 ** 3; window.mock.state.storage.tmpBytes = 32 * 1024 ** 2; window.mock.state.storage.totalBytes = 2 * 1024 ** 3 + 32 * 1024 ** 2; window.mock.state.storage.partial = false; window.mock.emit(); });
-    assert.equal(await page.getByTestId('job-priority-query-4101').count(), 1, 'reconnection resets old priorities');
+    assert.equal(await page.getByTestId('job-priority-4101').innerText(), '—', 'unknown priority displays a dash');
     for (const theme of ['light', 'dark']) {
       await page.getByTestId(`theme-${theme}`).click();
       await page.waitForFunction(theme => document.documentElement.dataset.theme === theme, theme);
@@ -197,7 +194,7 @@ const output = path.join(root, 'test-output');
     await page.getByTestId('startup-screen').waitFor();
     assert((await page.getByTestId('startup-screen').innerText()).includes('本地连接服务已退出，请重新启动应用。'));
     assert.equal(errors.length, 0, errors.join('\n'));
-    const report = { serverOperations: 'mock only', tauriBridge: true, asyncListenersBeforeInitial: true, liveStateBeatsInitialSnapshot: true, startupHostKeyRecoveredAndDeduplicated: true, staleHostKeySnapshotIgnored: true, expiredHostKeyDismissed: true, disconnectedHostKeyDismissed: true, nativeKeyPicker: true, backendFailureVisible: true, ownJobsOnly: true, priorityOnDemand: true, confirmsBeforeCancel: true, confirmsBeforeCleanup: true, expiredTokenDisabled: true, nullUsageIsUnknown: true, clockCenterRestored: true, reconnectClearsPriority: true, calls: await calls(), rendererErrors: errors };
+    const report = { serverOperations: 'mock only', tauriBridge: true, asyncListenersBeforeInitial: true, liveStateBeatsInitialSnapshot: true, startupHostKeyRecoveredAndDeduplicated: true, staleHostKeySnapshotIgnored: true, expiredHostKeyDismissed: true, disconnectedHostKeyDismissed: true, nativeKeyPicker: true, backendFailureVisible: true, ownJobsOnly: true, priorityFromQueue: true, confirmsBeforeCancel: true, confirmsBeforeCleanup: true, expiredTokenDisabled: true, nullUsageIsUnknown: true, clockCenterRestored: true, missingPriorityIsUnknown: true, calls: await calls(), rendererErrors: errors };
     await fs.writeFile(path.join(output, 'ui-actions-smoke.json'), JSON.stringify(report, null, 2));
     console.log(JSON.stringify(report, null, 2));
   } finally { await browser.close(); }

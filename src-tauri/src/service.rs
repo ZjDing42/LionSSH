@@ -52,7 +52,7 @@ pub const PUBLIC_METHODS: &[&str] = &[
     "terminal-close",
     "prepare-job-cancel",
     "cancel-job",
-    "get-job-priority",
+    "read-job-log",
     "prepare-tmp-cleanup",
     "cleanup-tmp",
     "set-slurm-scope",
@@ -1211,7 +1211,7 @@ impl Service {
             | "set-slurm-scope"
             | "prepare-job-cancel"
             | "cancel-job"
-            | "get-job-priority"
+            | "read-job-log"
             | "prepare-tmp-cleanup"
             | "cleanup-tmp" => {
                 let device = self.connected(&id)?;

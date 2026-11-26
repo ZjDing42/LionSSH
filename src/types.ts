@@ -69,6 +69,14 @@ export interface GpuCard {
 }
 
 export type SlurmScope = 'mine' | 'all';
+export type SlurmLogStream = 'stdout' | 'stderr';
+export interface SlurmLogCursor {
+  fileId: string;
+  offset: number;
+}
+export type SlurmLogChunk =
+  | { status: 'ready'; data: string; cursor: SlurmLogCursor; reset: boolean; truncated: boolean; shared: boolean }
+  | { status: 'missing' | 'unreadable' | 'unconfigured'; shared: boolean };
 export interface SlurmJob {
   id: string;
   partition: string;
@@ -82,6 +90,7 @@ export interface SlurmJob {
   nodeList: string;
   reasonCode: string;
   reasonLabel: string;
+  priority?: number | null;
   cluster?: string;
 }
 export interface SlurmState {
@@ -259,9 +268,9 @@ export interface LionApi {
   stopGpuProcess(id: string, token: string, mode: 'terminate' | 'kill'): Promise<{ pid: number; signalled: true }>;
   refreshSlurm(id: string): Promise<void>;
   setSlurmScope(id: string, scope: SlurmScope): Promise<void>;
+  readJobLog(id: string, jobId: string, stream: SlurmLogStream, cursor?: SlurmLogCursor): Promise<SlurmLogChunk>;
   prepareJobCancel(id: string, jobId: string): Promise<JobCancelPreview>;
   cancelJob(id: string, jobId: string, token: string): Promise<{ jobId: string; cancelled: true }>;
-  getJobPriority(id: string, jobId: string): Promise<{ jobId: string; priority: number | null; priorities?: number[] }>;
   refreshStorage(id: string): Promise<void>;
   refreshCodex(id: string): Promise<CodexState>;
   installCodex(id: string): Promise<CodexState>;

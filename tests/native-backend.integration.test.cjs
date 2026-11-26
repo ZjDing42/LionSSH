@@ -10,7 +10,7 @@ const { createPrivateKey } = require('node:crypto');
 const { ServiceHarness } = require('./helpers/service-harness.cjs');
 const { localSshServer, echoServer, freePort, roundTrip } = require('./helpers/local-ssh.cjs');
 const { profile, tunnel, delay } = require('./helpers/fixtures.cjs');
-const { mineQueue, allQueue } = require('./helpers/slurm-output.cjs');
+const { mineQueue, allQueue, queueCommand, mineQueueCommand, row } = require('./helpers/slurm-output.cjs');
 const { makeSummary } = require('./helpers/nvidia-summary.cjs');
 const commands = require('./fixtures/commands.json');
 const packageInfo = require('../package.json');
@@ -37,7 +37,7 @@ async function dataDirectory(t) {
 }
 async function fixture(t, options = {}, backendOptions = {}) {
   const dir = await dataDirectory(t);
-  const ssh = await localSshServer({ squeueResponse: command => command === 'squeue' ? allQueue : mineQueue, storageResponse, ...options });
+  const ssh = await localSshServer({ squeueResponse: command => command === queueCommand ? allQueue : mineQueue, storageResponse, ...options });
   const backend = new ServiceHarness(dir, backendOptions);
   t.after(async () => { await backend.stop(); await ssh.close(); });
   await backend.invoke('initial');
@@ -286,26 +286,34 @@ test('GPU CSV monitoring confirms idle cards, falls back to summary, and keeps d
 });
 
 test('Slurm scopes, priority, owner rechecks, injected identifiers and one-use cancellation confirmations remain guarded', integration, async t => {
-  let owner = 'tester'; let cancelled = false;
+  let owner = 'tester'; let cancelled = false; let priority = 3427;
   const { backend, ssh } = await fixture(t, {
-    squeueResponse: command => (command === 'squeue' ? allQueue : mineQueue).replace(cancelled ? /^.*4201.*\n/m : /$^/, ''),
+    squeueResponse: command => (command === queueCommand ? allQueue : mineQueue)
+      .replace('3427|', `${priority}|`).replace(cancelled ? /^.*4201.*\n/m : /$^/, ''),
     jobResponse: command => {
       if (command === commands.jobs['4201'].info) return jobRecord('4201', owner);
       if (command === commands.jobs['4203'].info) return jobRecord('4203', 'another');
-      if (command === commands.jobs['4203'].priority) return 'Priority=98765\n';
       if (command === commands.jobs['4201'].cancel) { cancelled = true; return ''; }
       return { stderr: 'Invalid job id specified\n', exitCode: 1 };
     },
   });
-  const input = profile(ssh, { autoReconnect: false }); await connect(backend, input); await monitors(backend, input.id);
-  assert.ok(ssh.stats.slurmCommands.includes('squeue -u tester'));
+  const input = profile(ssh, { autoReconnect: false }); await connect(backend, input);
+  const mine = await monitors(backend, input.id);
+  assert.ok(ssh.stats.slurmCommands.includes(mineQueueCommand));
+  assert.deepEqual(mine.slurm.jobs.map(job => job.priority), [3427, 0]);
   await backend.invoke('set-slurm-scope', input.id, 'all');
-  await backend.state(input.id, value => value.slurm.scope === 'all' && value.slurm.jobs.length === 3, 'all Slurm jobs');
-  assert.ok(ssh.stats.slurmCommands.includes('squeue'));
-  assert.deepEqual(await backend.invoke('get-job-priority', input.id, '4203'), { jobId: '4203', priority: 98765, priorities: [98765] });
+  const all = await backend.state(input.id, value => value.slurm.scope === 'all' && value.slurm.jobs.length === 3, 'all Slurm jobs');
+  assert.ok(ssh.stats.slurmCommands.includes(queueCommand));
+  assert.deepEqual(all.slurm.jobs.map(job => job.priority), [3427, 0, 98765]);
+  priority = 4381;
+  await backend.state(input.id, value => value.slurm.jobs[0]?.priority === 4381, 'automatic Slurm priority refresh', 36_000);
+  assert.deepEqual(ssh.stats.jobCommands, [], 'automatic priority refresh only uses the scheduled queue query');
+  priority = 5000;
+  await backend.invoke('refresh-slurm', input.id);
+  await backend.state(input.id, value => value.slurm.jobs[0]?.priority === 5000, 'manual Slurm priority refresh');
   await assert.rejects(backend.invoke('prepare-job-cancel', input.id, '4203'), /自己的作业|所属用户/);
   await assert.rejects(backend.invoke('cancel-job', input.id, '4201', 'unconfirmed'), /确认已失效/);
-  for (const id of ['4201; id', '4201\nwhoami', '$(id)', '-1']) await assert.rejects(backend.invoke('get-job-priority', input.id, id), /作业 ID/);
+  for (const id of ['4201; id', '4201\nwhoami', '$(id)', '-1']) await assert.rejects(backend.invoke('prepare-job-cancel', input.id, id), /作业 ID/);
   const previous = await backend.invoke('prepare-job-cancel', input.id, '4201');
   assert.equal(previous.owner, 'tester'); assert.ok(previous.expiresAt > Date.now());
   assert.equal(cancelled, false);
@@ -318,6 +326,48 @@ test('Slurm scopes, priority, owner rechecks, injected identifiers and one-use c
   assert.deepEqual(result, { jobId: '4201', cancelled: true });
   await assert.rejects(backend.invoke('cancel-job', input.id, '4201', preparation.token), /确认已失效|最新作业列表/);
   assert.equal(ssh.stats.jobCommands.filter(command => command.startsWith('scancel ')).length, 1);
+  assert.deepEqual(ssh.stats.rejectedCommands, []);
+});
+
+test('Slurm log reads recheck running state and ownership, preserve paths, and read only the selected stream', integration, async t => {
+  const otherRunning = row(['4203', 'batch', 'other', 'another', 'R', '2:03', 1, 'cpu09']);
+  let owner = 'tester';
+  let state = 'RUNNING';
+  const { backend, ssh } = await fixture(t, {
+    squeueResponse: command => command === queueCommand ? `${mineQueue}20|another|${otherRunning}\n` : mineQueue,
+    jobResponse: command => {
+      if (command === commands.jobs['4201'].info) {
+        return `${jobRecord('4201', owner).replace('RUNNING', state)}   StdOut=/data/job's logs/job.out\n   StdErr=/data/job's logs/job.err\n`;
+      }
+      if (command === commands.jobs['4203'].info) return jobRecord('4203', 'another');
+      throw new Error(`Unexpected job query ${command}`);
+    },
+    jobLogResponse: command => {
+      if (command.endsWith(` -- '/data/job'"'"'s logs/job.out' 0 '' 1048576`)) return '5:11 0 1\nYWJj';
+      if (command.endsWith(` -- '/data/job'"'"'s logs/job.out' 3 '5:11' 1048576`)) return '5:11 3 0\nZA==';
+      if (command.endsWith(` -- '/data/job'"'"'s logs/job.err' 0 '' 1048576`)) return 'MISSING\n';
+      return { stderr: 'Unexpected log arguments', exitCode: 1 };
+    },
+  });
+  const input = profile(ssh, { autoReconnect: false });
+  await connect(backend, input);
+  await monitors(backend, input.id);
+  const read = (id, kind = 'stdout', cursor) => backend.invoke('read-job-log', input.id, id, kind, cursor);
+  assert.deepEqual(await read('4201'), { status: 'ready', data: 'YWJj', cursor: { fileId: '5:11', offset: 3 }, reset: true, truncated: false, shared: false });
+  assert.deepEqual(await read('4201', 'stdout', { fileId: '5:11', offset: 3 }), { status: 'ready', data: 'ZA==', cursor: { fileId: '5:11', offset: 4 }, reset: false, truncated: false, shared: false });
+  assert.deepEqual(await read('4201', 'stderr'), { status: 'missing', shared: false });
+  await assert.rejects(read('4202'), /自己正在运行/);
+  await assert.rejects(read('4201; id'), /作业 ID/);
+  await assert.rejects(read('4201', 'stdout', { fileId: '$(id)', offset: 3 }), /日志位置/);
+  await backend.invoke('set-slurm-scope', input.id, 'all');
+  await monitors(backend, input.id, value => value.slurm.scope === 'all' && value.slurm.jobs.length === 3);
+  await assert.rejects(read('4203'), /自己正在运行/);
+  owner = 'another';
+  await assert.rejects(read('4201'), /自己正在运行/);
+  owner = 'tester';
+  state = 'COMPLETED';
+  await assert.rejects(read('4201'), /自己正在运行/);
+  assert.equal(ssh.stats.jobCommands.filter(command => command.startsWith('bash -o pipefail')).length, 3);
   assert.deepEqual(ssh.stats.rejectedCommands, []);
 });
 
@@ -388,15 +438,21 @@ test('skipped storage roots contribute zero; genuine scan errors retain warnings
 });
 
 test('disconnect cancels a stalled remote query promptly and invalidates confirmations across reconnects', integration, async t => {
-  const { backend, ssh } = await fixture(t, { jobResponse: command => command === commands.jobs['4201'].info ? jobRecord('4201') : { hang: true } });
+  let hang = false;
+  const { backend, ssh } = await fixture(t, {
+    jobResponse: () => hang ? { hang: true } : jobRecord('4201'),
+  });
   const input = profile(ssh, { autoReconnect: false }); await connect(backend, input); await monitors(backend, input.id);
   const job = await backend.invoke('prepare-job-cancel', input.id, '4201');
   const cleanup = await backend.invoke('prepare-tmp-cleanup', input.id);
-  const pending = backend.invoke('get-job-priority', input.id, '4201').then(() => ({ ok: true }), error => ({ error }));
-  await backend.waitFor(() => ssh.stats.jobCommands.includes(commands.jobs['4201'].priority), 'stalled query reached server');
+  hang = true;
+  const seen = ssh.stats.jobCommands.length;
+  const pending = backend.invoke('prepare-job-cancel', input.id, '4201').then(() => ({ ok: true }), error => ({ error }));
+  await backend.waitFor(() => ssh.stats.jobCommands.length > seen, 'stalled query reached server');
   const start = Date.now(); await backend.invoke('disconnect', input.id);
   assert.ok(Date.now() - start < 5000);
   assert.ok((await pending).error);
+  hang = false;
   await backend.invoke('connect', input.id);
   await backend.state(input.id, value => value.status === 'connected', 'reconnected SSH'); await monitors(backend, input.id);
   await assert.rejects(backend.invoke('cancel-job', input.id, '4201', job.token), /确认已失效/);

@@ -29,13 +29,28 @@ async function installMockApi(page) {
     let stateCallback;
     const send = () => stateCallback?.(JSON.parse(JSON.stringify(state)));
     state.slurm.jobs = ownJobs;
-    window.__slurmUi = { state, send, ownJobs, allJobs };
+    const logReads = [];
+    window.__slurmUi = { state, send, ownJobs, allJobs, logReads };
     window.lion = {
       initialTheme: { preference: 'light', resolved: 'light' },
       getInitial: async () => ({ profiles: [profile], states: [JSON.parse(JSON.stringify(state))], version: '1.5.0' }),
       setTheme: async preference => ({ preference, resolved: preference === 'system' ? 'light' : preference }),
       onState: callback => { stateCallback = callback; return () => {}; },
       onHostKey: () => () => {}, onTheme: () => () => {}, onShutdown: () => () => {},
+      readJobLog: async (id, jobId, kind, cursor) => {
+        logReads.push({ id, jobId, kind, cursor });
+        if (window.__slurmUi.failNextLogRead) {
+          window.__slurmUi.failNextLogRead = false;
+          throw new Error('日志读取失败');
+        }
+        const progress = Array.from({ length: 80 }, (_, index) =>
+          `Training progress: 57%|████████▌      | ${39600 + index * 10}/70000 [18:14<18:39, 27.09it/s, Loss=0.0259231]`).join('\r');
+        const data = cursor
+          ? `${logReads.length === 3 ? '\n' : ''}appended ${logReads.length}\rprogress update\n`
+          : kind === 'stderr' ? `${progress}\rstderr initial\r` : `${kind} initial\n`.repeat(160);
+        const bytes = new TextEncoder().encode(data);
+        return { status: 'ready', data: btoa(String.fromCharCode(...bytes)), cursor: { fileId: '1:2', offset: (cursor?.offset ?? 0) + bytes.length }, reset: !cursor, truncated: false, shared: false };
+      },
       setSlurmScope: async (_id, scope) => {
         state.slurm.scope = scope; state.slurm.status = 'loading'; state.slurm.jobs = []; delete state.slurm.lastUpdated; delete state.slurm.error; send();
         setTimeout(() => { state.slurm.jobs = scope === 'mine' ? ownJobs : allJobs; state.slurm.status = 'ready'; state.slurm.lastUpdated = Date.now(); send(); }, 650);
@@ -223,17 +238,22 @@ async function verifySparseGrid(page, expectedRows, description, baseline) {
     assert(Math.abs(cell.left - cell.headerLeft) <= 1 && Math.abs(cell.width - cell.headerWidth) <= 1, `${description}: blank grid column ${index + 1} aligns with its header`);
     assert(cell.background.includes('linear-gradient'), `${description}: blank grid column ${index + 1} has visible horizontal dividers`);
   }
-  assert(layout.filler.cells[0].rightBorder >= 1 && layout.filler.cells[9].leftBorder >= 1, `${description}: vertical sticky-column borders extend through blank space`);
-  for (const index of [0, 9, 10]) assert(!['rgba(0, 0, 0, 0)', 'transparent'].includes(layout.filler.cells[index].backgroundColor), `${description}: pinned blank column ${index + 1} has an opaque surface`);
+  assert(layout.filler.cells[0].rightBorder >= 1 && layout.filler.cells[10].leftBorder >= 1, `${description}: vertical sticky-column borders extend through blank space`);
+  assert.equal(layout.filler.cells[9].leftBorder, 0, `${description}: priority stays in the scrollable job data`);
+  for (const index of [0, 10]) assert(!['rgba(0, 0, 0, 0)', 'transparent'].includes(layout.filler.cells[index].backgroundColor), `${description}: pinned blank column ${index + 1} has an opaque surface`);
   assert(layout.scrollHeight <= layout.contentHeight + 1, `${description}: sparse rows do not introduce vertical scrolling`);
   assert(layout.document <= layout.viewport + 1, `${description}: horizontal overflow stays inside the card`);
   if (layout.scrollWidth > layout.contentWidth) {
-    await page.locator('.slurm-table-wrap').evaluate(element => { element.scrollLeft = element.scrollWidth; });
     const sticky = await page.locator('.slurm-table-wrap').evaluate(element => {
       const bounds = element.getBoundingClientRect();
       const row = element.querySelector('tbody tr');
+      const priority = row.querySelector('.slurm-priority');
+      element.scrollLeft = 0;
+      const priorityBefore = priority.getBoundingClientRect().left;
+      element.scrollLeft = element.scrollWidth;
       return {
         scrollLeft: element.scrollLeft,
+        priorityMovement: priorityBefore - priority.getBoundingClientRect().left,
         firstColumnX: row.querySelector('td').getBoundingClientRect().left - bounds.left,
         actionRight: bounds.left + element.clientWidth - row.querySelector('td:last-child').getBoundingClientRect().right,
         fillerColumns: Array.from(element.querySelectorAll('tfoot td'), (cell, index) => {
@@ -244,6 +264,7 @@ async function verifySparseGrid(page, expectedRows, description, baseline) {
       };
     });
     assert(sticky.scrollLeft > 0 && Math.abs(sticky.firstColumnX) <= 1 && Math.abs(sticky.actionRight) <= 1, `${description}: outer columns stay visible after horizontal scrolling: ${JSON.stringify(sticky)}`);
+    assert(Math.abs(sticky.priorityMovement - sticky.scrollLeft) <= 1, `${description}: priority scrolls with the other job data`);
     for (const [index, cell] of sticky.fillerColumns.entries()) assert(Math.abs(cell.left - cell.headerLeft) <= 1 && Math.abs(cell.width - cell.headerWidth) <= 1, `${description}: blank grid column ${index + 1} stays aligned after scrolling`);
   }
   return layout;
@@ -421,6 +442,16 @@ async function verifyPersistentRestart(errors) {
     for (let index = 0; index < 6; index++) await handle.press('Shift+ArrowDown');
     await expectCardHeight(firstPage, 760, 'saved before browser exit');
     assert.equal(await firstPage.evaluate(key => localStorage.getItem(key), resizeStorageKey), '760');
+    await firstPage.getByTestId('job-log-167981').click();
+    const firstDialog = firstPage.getByTestId('slurm-log-dialog');
+    assert.equal(await firstDialog.getByRole('checkbox').isChecked(), false);
+    await firstDialog.getByRole('button', { name: '.err' }).click();
+    await firstDialog.getByText(/stderr initial/).waitFor();
+    await firstPage.evaluate(() => { window.__slurmUi.failNextLogRead = true; });
+    await firstDialog.getByRole('checkbox').click();
+    await firstDialog.getByRole('alert').waitFor();
+    assert.match(await firstDialog.getByRole('alert').textContent(), /日志读取失败/);
+    assert.equal(await firstDialog.getByRole('checkbox').isChecked(), false, 'an error pauses the current dialog');
     await context.close();
     context = undefined;
 
@@ -434,7 +465,13 @@ async function verifyPersistentRestart(errors) {
     assert.equal(await reopenedPage.evaluate(key => localStorage.getItem(key), resizeStorageKey), '760');
     await verifySparseGrid(reopenedPage, 3, 'saved height after full browser restart', sparseBaseline);
     await reopenedPage.getByTestId('slurm-card').screenshot({ path: path.join(output, 'slurm-card-restarted.png') });
-    return { passed: true, restoredHeight: 760, isolatedBrowserProcess: true };
+    await reopenedPage.getByTestId('job-log-167981').click();
+    const reopenedDialog = reopenedPage.getByTestId('slurm-log-dialog');
+    assert.equal(await reopenedDialog.getByRole('button', { name: '.err' }).getAttribute('aria-pressed'), 'true');
+    assert.equal(await reopenedDialog.getByRole('checkbox').isChecked(), true, 'restart restores the last user choice after a read error');
+    await reopenedPage.waitForFunction(() => window.__slurmUi.logReads.some(read => read.cursor && read.kind === 'stderr'));
+    assert(await reopenedPage.evaluate(() => window.__slurmUi.logReads.every(read => read.kind === 'stderr')));
+    return { passed: true, restoredHeight: 760, logPreferences: { stream: 'stderr', follow: true }, isolatedBrowserProcess: true };
   } finally {
     await context?.close();
     assert.equal(path.dirname(profileDirectory), output, 'temporary browser profile stays inside test-output');
@@ -454,7 +491,9 @@ async function verifyPersistentRestart(errors) {
     await page.goto(fixtureUrl);
     const card = page.getByTestId('slurm-card');
     await card.waitFor();
-    assert.deepEqual(await page.getByTestId('slurm-table').locator('th').allTextContents(), ['作业编号', '分区', '作业名称', '用户', '状态', '已运行时间', '节点数', '节点列表', '原因', '权重', '操作']);
+    const headers = page.getByTestId('slurm-table').locator('th');
+    assert.deepEqual(await headers.allTextContents(), ['作业编号', '分区', '作业名称', '用户', '状态', '已运行时间', '节点数', '节点列表', '原因', '权重', '日志删除']);
+    assert.deepEqual(await headers.last().locator('span').allTextContents(), ['日志', '删除']);
     assert.equal(await card.locator('tbody tr').count(), 3);
     assert.equal(await card.getByText('运行中', { exact: true }).count(), 1);
     assert.equal(await card.getByText('等待可用资源', { exact: true }).count(), 1);
@@ -478,6 +517,71 @@ async function verifyPersistentRestart(errors) {
     assert(Math.abs((await cardMetrics(page)).height - beforeScopeLoading.height) <= 1, 'uncached scope loading preserves card height');
     assert.equal(await page.getByTestId('slurm-scope-all').getAttribute('aria-pressed'), 'true');
     await page.waitForFunction(() => document.querySelectorAll('[data-testid="slurm-table"] tbody tr').length === 4);
+    await page.evaluate(() => {
+      const { state, send } = window.__slurmUi;
+      state.slurm.jobs = state.slurm.jobs.map(job => job.id === '167988' ? { ...job, stateCode: 'R' } : job);
+      send();
+    });
+    const logButton = page.getByTestId('job-log-167981');
+    assert.equal(await logButton.count(), 1);
+    assert.equal(await logButton.textContent(), '');
+    assert.equal(await logButton.locator('svg').count(), 1);
+    assert.equal(await page.getByTestId('job-log-167987').count(), 0, 'pending jobs have no log button');
+    assert.equal(await page.getByTestId('job-log-167988').count(), 0, 'running jobs owned by other users have no log button');
+    assert.equal(await logButton.evaluate(button => button.nextElementSibling?.dataset.testid), 'job-cancel-167981');
+    const center = async locator => {
+      const { x, width } = await locator.boundingBox();
+      return x + width / 2;
+    };
+    assert(Math.abs(await center(headers.last().getByText('日志')) - await center(logButton)) < 1);
+    assert(Math.abs(await center(headers.last().getByText('删除')) - await center(page.getByTestId('job-cancel-167987'))) < 1);
+    await logButton.click();
+    const logDialog = page.getByTestId('slurm-log-dialog');
+    const logContent = logDialog.locator('.slurm-log-view');
+    await logDialog.getByText(/stdout initial/).waitFor();
+    await logDialog.getByRole('button', { name: '.err' }).click();
+    await logDialog.getByText(/stderr initial/).waitFor();
+    assert.equal(await logDialog.getByText(/stdout initial/).count(), 0);
+    const logText = logDialog.locator('.slurm-log-text');
+    const rendered = await logText.textContent();
+    assert.equal(rendered.includes('\r'), false);
+    assert(rendered.startsWith('Training progress: 57%|████████▌'));
+    assert.equal(rendered.split('\n').length, 82, 'each carriage-return progress update appears on its own line');
+    assert(await logDialog.evaluate(dialog => dialog.clientWidth >= innerWidth * 0.9), 'dialog uses most of the app width');
+    assert.equal(await logText.evaluate(text => getComputedStyle(text).whiteSpace), 'pre');
+    await logDialog.getByRole('checkbox').check();
+    await page.waitForFunction(() => window.__slurmUi.logReads.length >= 4);
+    await page.waitForFunction(() => document.querySelector('.slurm-log-text')?.textContent.includes('appended 4'));
+    assert((await logText.textContent()).includes('stderr initial\nappended 3\nprogress update'), 'split CRLF still appears as one line break');
+    assert.equal(await logContent.evaluate(view => Math.abs(view.scrollHeight - view.clientHeight - view.scrollTop) < 2), true);
+    assert.equal(await page.evaluate(() => window.__slurmUi.logReads.at(-1).cursor.fileId), '1:2');
+    await logDialog.getByRole('checkbox').uncheck();
+    const stoppedReads = await page.evaluate(() => window.__slurmUi.logReads.length);
+    await page.waitForTimeout(1100);
+    assert.equal(await page.evaluate(() => window.__slurmUi.logReads.length), stoppedReads);
+    await logDialog.getByRole('checkbox').check();
+    await page.keyboard.press('Escape');
+    await logDialog.waitFor({ state: 'hidden' });
+    assert.equal(await logButton.evaluate(button => document.activeElement === button), true);
+    const closedReads = await page.evaluate(() => window.__slurmUi.logReads.length);
+    await page.waitForTimeout(1100);
+    assert.equal(await page.evaluate(() => window.__slurmUi.logReads.length), closedReads);
+    await page.getByTestId('theme-dark').click();
+    await page.waitForFunction(() => document.documentElement.dataset.theme === 'dark');
+    await page.setViewportSize({ width: 1920, height: 1080 });
+    await logButton.click();
+    assert.equal(await logDialog.getByRole('button', { name: '.err' }).getAttribute('aria-pressed'), 'true');
+    assert.equal(await logDialog.getByRole('checkbox').isChecked(), true);
+    await logDialog.getByText(/stderr initial/).waitFor();
+    assert.equal(await page.evaluate(index => window.__slurmUi.logReads[index].kind, closedReads), 'stderr');
+    await logDialog.getByRole('checkbox').uncheck();
+    assert(await logDialog.evaluate(dialog => dialog.clientWidth >= innerWidth * 0.9), 'wide dashboards use a wider log dialog');
+    await logDialog.screenshot({ path: path.join(output, 'slurm-log-dialog-dark.png') });
+    await page.keyboard.press('Escape');
+    await logButton.click();
+    assert.equal(await logDialog.getByRole('checkbox').isChecked(), false, 'an explicit uncheck is restored');
+    await page.keyboard.press('Escape');
+    await page.setViewportSize({ width: 1366, height: 1000 });
     assert.equal(await card.getByText('colleague', { exact: true }).count(), 1);
     sparseBaselines.all = await measureJobRows(page);
     for (const theme of ['light', 'dark']) {
@@ -564,10 +668,11 @@ async function verifyPersistentRestart(errors) {
     await page.evaluate(() => { const { state, send } = window.__slurmUi; state.slurm.status = 'loading'; send(); });
     await page.waitForFunction(() => document.querySelector('[data-testid="slurm-card"]').getAttribute('aria-busy') === 'true');
     const automaticRefresh = await assertRefreshStable(page, beforeAutomatic, 'paginated automatic refresh while loading');
-    await page.evaluate(() => { const { state, send, largeJobs } = window.__slurmUi; state.slurm.status = 'ready'; state.slurm.jobs = largeJobs.map(job => ({ ...job, elapsed: '2-03:12:05' })); send(); });
+    await page.evaluate(() => { const { state, send, largeJobs } = window.__slurmUi; state.slurm.status = 'ready'; state.slurm.jobs = largeJobs.map(job => ({ ...job, elapsed: '2-03:12:05', priority: 4381 })); send(); });
     await page.waitForFunction(() => document.querySelector('[data-testid="slurm-card"]').getAttribute('aria-busy') === 'false');
     await assertRefreshStable(page, beforeAutomatic, 'paginated automatic refresh after completion');
     assert.equal(await card.locator('tbody tr').first().locator('td').nth(5).textContent(), '2-03:12:05', 'automatic refresh updates values in place');
+    assert.equal(await page.getByTestId('job-priority-300100').textContent(), '4,381', 'automatic refresh updates priority in place');
     assert.equal(await page.getByTestId('slurm-page-number').textContent(), '2 / 3 页', 'automatic refresh preserves the selected page');
     await captureRefresh(page);
     await page.evaluate(() => { const { state, send } = window.__slurmUi; state.slurm.status = 'loading'; send(); });
@@ -596,6 +701,6 @@ async function verifyPersistentRestart(errors) {
     const restart = await verifyPersistentRestart(errors);
     assert.deepEqual(errors, []);
     await fs.writeFile(path.join(output, 'slurm-ui-smoke.json'), JSON.stringify({ passed: true, headers: 11, scopes: ['mine', 'all'], themes: ['light', 'dark'], refresh: { manual: manualRefresh, automatic: automaticRefresh, knownEmpty: emptyRefresh, errorRetainsResults: true, distinctPartitionRowIdentity: distinctPartitions }, pagination: { total: 203, pageSize: 100, refreshStable: true, shrinkClamped: true }, resize, restart, layout, errors }, null, 2));
-    console.log('Slurm UI smoke passed: scope isolation, stable manual/automatic/empty refresh, retained nodes and scrolling, pagination, natural row and column sizes with extended blank grids, sticky columns, pointer/keyboard resizing and saved height after browser restart.');
+    console.log('Slurm UI smoke passed: queue layout and refresh, pagination, resizing, log following, and saved preferences after browser restart.');
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

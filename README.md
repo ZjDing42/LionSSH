@@ -16,7 +16,7 @@
 | Multi-hop SSH | Add and reorder jump hosts, configure credentials for each hop, and test each hop or the target before saving. |
 | Port tunnels | Manage forward and reverse tunnels with multiple rules, failure detection, and automatic recovery. |
 | NVIDIA GPU monitoring | See GPU usage, idle counts, process owners and per-GPU process details; confirm before ending your own processes. Supports scheduled checks, pause, and manual refresh. |
-| Slurm job management | View your jobs or all jobs, inspect status and queue reasons, query Priority, and cancel your own jobs after confirmation. |
+| Slurm job management | View your jobs or all jobs with status, queue reasons and priority. Read and follow logs for your running jobs, and cancel your own jobs after confirmation. |
 | SFTP file manager | Browse remote directories, edit text, preview images, transfer files and folders, and copy between servers. |
 | Personal storage | Count your files in accessible directories, skipping permission-denied paths; preview and confirm cleanup of your own temporary files. |
 | Chinese and English | Chinese system locales default to Chinese; all other locales default to English. Manually choose 中文, English, or System, with your preference saved. |
@@ -83,7 +83,7 @@ Tool panels use the available window width with fixed side margins. Personal sto
 
 ## Download
 
-**[Download the latest release](https://github.com/ZjDing42/LionSSH/releases/latest)** · [v1.12.0 release notes](.github/release-notes/v1.12.0.md)
+**[Download the latest release](https://github.com/ZjDing42/LionSSH/releases/latest)** · [v1.13.0 release notes](.github/release-notes/v1.13.0.md)
 
 | Platform | Package |
 | --- | --- |

@@ -7,6 +7,7 @@ const path = require('node:path');
 const { generateKeyPairSync, createHash } = require('node:crypto');
 const { Server, utils } = require('ssh2');
 const { summaryFixture } = require('./nvidia-summary.cjs');
+const { queueCommand } = require('./slurm-output.cjs');
 const commandFixtures = require('../fixtures/commands.json');
 const allowedStorageCommands = new Set(Object.values(commandFixtures.storage));
 const allowedJobCommands = new Set(Object.values(commandFixtures.jobs).flatMap(Object.values));
@@ -235,6 +236,13 @@ async function localSshServer(options = {}) {
             writeResponse(stream, response ?? { stderr: 'find: command not found\n', exitCode: 127 });
             return;
           }
+          if (options.jobLogResponse && info.command.startsWith("bash -o pipefail -c 'path=$1\n")) {
+            stats.jobCommands.push(info.command);
+            const stream = acceptExec();
+            stream.on('error', () => {});
+            writeResponse(stream, options.jobLogResponse(info.command));
+            return;
+          }
           if (/^(?:scontrol|scancel)(?:\s|$)/.test(info.command)) {
             if (!allowedJobCommands.has(info.command)) {
               stats.rejectedCommands.push(info.command);
@@ -251,7 +259,8 @@ async function localSshServer(options = {}) {
           }
           if (/^squeue(?:\s|$)/.test(info.command)) {
             stats.slurmCommands.push(info.command);
-            if (!/^squeue(?: -u [^\r\n]+)?$/.test(info.command) || /[;&|`\r\n]/.test(info.command)) {
+            const scopeArgument = info.command.slice(queueCommand.length);
+            if (!info.command.startsWith(queueCommand) || (scopeArgument && !/^ -u [\w.@-]+\$?$/.test(scopeArgument))) {
               stats.rejectedCommands.push(info.command);
               return reject();
             }

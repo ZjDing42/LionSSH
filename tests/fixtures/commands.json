@@ -7,32 +7,26 @@
   "jobs": {
     "4201": {
       "info": "scontrol show job 4201",
-      "priority": "scontrol show job 4201 | grep -o 'Priority=[0-9]*'",
       "cancel": "scancel 4201"
     },
     "4202": {
       "info": "scontrol show job 4202",
-      "priority": "scontrol show job 4202 | grep -o 'Priority=[0-9]*'",
       "cancel": "scancel 4202"
     },
     "4203": {
       "info": "scontrol show job 4203",
-      "priority": "scontrol show job 4203 | grep -o 'Priority=[0-9]*'",
       "cancel": "scancel 4203"
     },
     "5100_7": {
       "info": "scontrol show job 5100_7",
-      "priority": "scontrol show job 5100_7 | grep -o 'Priority=[0-9]*'",
       "cancel": "scancel 5100_7"
     },
     "5100_[1-5%2]": {
       "info": "scontrol show job 5100",
-      "priority": "scontrol show job 5100 | grep -o 'Priority=[0-9]*'",
       "cancel": "scancel '5100_[1-5]'"
     },
     "5100+0": {
       "info": "scontrol show job 5100+0",
-      "priority": "scontrol show job 5100+0 | grep -o 'Priority=[0-9]*'",
       "cancel": "scancel 5100+0"
     }
   }

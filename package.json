@@ -1,6 +1,6 @@
 {
   "name": "lion-ssh",
-  "version": "1.12.0",
+  "version": "1.13.0",
   "description": "SSH connections, tunnels and server monitoring in one desktop workspace",
   "author": "Lion SSH contributors",
   "private": true,

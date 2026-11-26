@@ -381,16 +381,15 @@ button { border: 0; }
 .slurm-table th:nth-child(1) { width: 144px; }
 .slurm-table th:nth-child(7) { width: 72px; }
 .slurm-table th:nth-child(9) { width: 180px; }
-.slurm-table th:nth-child(10) { width: 88px; }
-.slurm-table th:nth-child(11) { width: 64px; }
+.slurm-table th:nth-child(10) { width: 112px; }
+.slurm-table th:nth-child(11) { width: 112px; }
 /* Fixed outer columns keep the selected job and its actions visible while only
    the middle columns scroll. Their opaque backgrounds also cover row content. */
 .slurm-table :is(th, td):first-child { position: sticky; left: 0; border-right: 1px solid var(--line); }
-.slurm-table :is(th, td):nth-child(10) { position: sticky; right: 64px; border-left: 1px solid var(--line); }
-.slurm-table :is(th, td):last-child { position: sticky; right: 0; }
-.slurm-table :is(tbody, tfoot) :is(td:first-child, td:nth-child(10), td:last-child) { z-index: 2; background-color: var(--slurm-sticky-surface); }
-.slurm-table thead :is(th:first-child, th:nth-child(10), th:last-child) { z-index: 3; background: var(--surface-soft); }
-.slurm-table tbody tr:hover :is(td:first-child, td:nth-child(10), td:last-child) { background: var(--accent-soft); }
+.slurm-table :is(th, td):last-child { position: sticky; right: 0; border-left: 1px solid var(--line); }
+.slurm-table :is(tbody, tfoot) :is(td:first-child, td:last-child) { z-index: 2; background-color: var(--slurm-sticky-surface); }
+.slurm-table thead :is(th:first-child, th:last-child) { z-index: 3; background: var(--surface-soft); }
+.slurm-table tbody tr:hover :is(td:first-child, td:last-child) { background: var(--accent-soft); }
 .slurm-table tbody tr:last-child td { border-bottom: 0; }
 .slurm-table tbody tr:hover { background: var(--accent-soft); }
 /* Only the decorative blank area grows; real job rows keep their natural size. */
@@ -405,9 +404,11 @@ button { border: 0; }
 .slurm-job-state .status-dot { width: 5px; height: 5px; }
 .slurm-elapsed, .slurm-node-count { font-variant-numeric: tabular-nums; white-space: nowrap; }
 .slurm-job-reason { font-size: 11px; overflow-wrap: anywhere; }
-.slurm-priority { font-variant-numeric: tabular-nums; }
-.slurm-priority .text-button { font-size: 11px; white-space: nowrap; }
-.slurm-no-action { color: var(--text-subtle); }
+.slurm-priority { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.slurm-no-action { grid-column: 1 / -1; color: var(--text-subtle); }
+.slurm-row-actions { display: grid; grid-template-columns: repeat(2, 1fr); align-items: center; justify-items: center; gap: 6px; }
+.slurm-log-button { grid-column: 1; }
+.slurm-delete-button { grid-column: 2; }
 .slurm-empty { display: flex; flex: 1; justify-content: center; align-items: center; gap: 10px; min-height: 106px; color: var(--text-subtle); font-size: 12px; padding: 24px; border-top: 1px solid var(--line); }
 .slurm-empty > svg { color: var(--icon-muted); }
 .slurm-warning { display: flex; align-items: flex-start; gap: 7px; margin: 0 24px 17px; padding: 9px 11px; background: #fcf8ed; color: var(--amber); border-radius: 7px; font-size: 11px; line-height: 1.7; overflow-wrap: anywhere; }
@@ -539,6 +540,21 @@ button { border: 0; }
 .host-backdrop { z-index: 40; }
 .modal { background: #fff; padding: 28px 30px; width: 410px; max-height: 90vh; overflow-y: auto; border: 1px solid #fff; border-radius: 18px; box-shadow: 0 18px 70px #1f3a5836; }
 .modal.host-modal { width: 470px; }
+.slurm-log-backdrop { padding-inline: clamp(16px, 3vw, 64px); }
+.modal.slurm-log-modal { display: flex; flex-direction: column; gap: 12px; width: 100%; height: min(86vh, 1000px); padding: 20px 24px; overflow: hidden; }
+.slurm-log-header { display: flex; align-items: center; justify-content: space-between; gap: 10px 18px; flex-wrap: wrap; }
+.slurm-log-heading { display: grid; min-width: 0; gap: 3px; }
+.slurm-log-heading h2 { margin: 0; overflow-wrap: anywhere; }
+.slurm-log-heading > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-subtle); font-size: 12px; }
+.slurm-log-controls { display: flex; align-items: center; gap: 10px; margin-left: auto; }
+.slurm-log-controls .checkbox-row { margin: 0; white-space: nowrap; }
+.slurm-log-controls .segmented-control { margin: 0; }
+.slurm-log-controls .segmented-control > button { min-width: 46px; height: 27px; padding: 0 6px; font-family: 'Cascadia Code', Consolas, monospace; }
+.slurm-log-notes { display: flex; gap: 6px 16px; flex-wrap: wrap; color: var(--text-subtle); font-size: 12px; }
+.slurm-log-view { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 14px 16px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-soft); }
+.slurm-log-text { width: max-content; margin: 0; white-space: pre; tab-size: 4; font: 14px/1.6 'Cascadia Code', Consolas, monospace; color: var(--text); }
+.slurm-log-status { color: var(--text-subtle); font-size: 12px; }
+.slurm-log-error { color: var(--red); overflow-wrap: anywhere; }
 .modal-icon { display: grid; place-items: center; width: 48px; height: 48px; border-radius: 13px; margin-bottom: 19px; }
 .modal-icon.blue { background: #edf3ff; color: var(--icon-muted); }
 .modal-icon.red { background: #fcf0f2; color: var(--red); }

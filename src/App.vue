@@ -4,6 +4,7 @@ import Icon from './components/Icon.vue';
 import GpuProcessPanel from './components/GpuProcessPanel.vue';
 import GpuUserBadge from './components/GpuUserBadge.vue';
 import JumpHostsEditor from './components/JumpHostsEditor.vue';
+import SlurmLogDialog from './components/SlurmLogDialog.vue';
 import { gpuUsers } from './gpu-process';
 import { api as desktopApi } from './api';
 import { applyLanguage, language, message, resolveLanguage, t } from './i18n';
@@ -92,16 +93,13 @@ const jobCancellation = ref<{
     jobName: string;
     preview: JobCancelPreview;
 } | null>(null);
+const jobLog = ref<{ profileId: string; jobId: string; jobName: string } | null>(null);
+let jobLogTrigger: HTMLButtonElement | null = null;
 const tmpCleanup = ref<{
     profileId: string;
     profileName: string;
     preview: TmpCleanupPreview;
 } | null>(null);
-const priorities = reactive<Record<string, {
-    value?: number | null;
-    values?: number[];
-    error?: string;
-}>>({});
 const connectionGenerations: Record<string, number> = {};
 const hostRequests = ref<HostKeyRequest[]>([]);
 const runtimeSecrets: Record<string, Secrets> = {};
@@ -334,6 +332,15 @@ watch([slurmInitialLoading, selectedId], ([isLoading, id], [, previousId]) => {
 const slurmMinimumHeight = computed(() => slurmCardHeight.value === null && slurmInitialLoading.value
     ? Math.max(slurmMinHeight, slurmLoadingHeight.value || 0) : slurmMinHeight);
 const slurmJobs = computed(() => slurm.value?.scope === slurmScope.value ? slurm.value.jobs : []);
+watch([selectedId, page, connected, shutdown, slurm], ([id, view, isConnected, shuttingDown, queue]) => {
+    const target = jobLog.value;
+    if (!target) return;
+    if (id !== target.profileId || view !== 'workspace' || !isConnected || shuttingDown) {
+        closeJobLog(false);
+    } else if (queue?.status === 'ready' && !queue.jobs.some(job => job.id === target.jobId && canReadJobLog(job))) {
+        closeJobLog();
+    }
+});
 const slurmPageCount = computed(() => Math.max(1, Math.ceil(slurmJobs.value.length / slurmPageSize)));
 const slurmPageRows = computed(() => slurmJobs.value.slice((slurmPage.value - 1) * slurmPageSize, slurmPage.value * slurmPageSize));
 watch([selectedId, slurmScope], () => { slurmPage.value = 1; });
@@ -373,7 +380,7 @@ const confirmationExpired = computed(() => {
 const recentEvents = computed(() => [...(currentState.value?.events || [])]
     .sort((a, b) => timestamp(b.time) - timestamp(a.time)).slice(0, 40));
 const hostRequest = computed(() => hostRequests.value[0]);
-const anyModal = computed(() => Boolean(drawer.value || credentialProfile.value || deleting.value || jobCancellation.value || tmpCleanup.value || hostRequest.value));
+const anyModal = computed(() => Boolean(drawer.value || credentialProfile.value || deleting.value || jobCancellation.value || jobLog.value || tmpCleanup.value || hostRequest.value));
 watch(anyModal, open => { if (open) gpuProcessTarget.value = null; });
 function getState(profile: Profile): ServerState {
     return states[profile.id] || {
@@ -607,38 +614,29 @@ function slurmReasonTitle(job: SlurmJob): string {
 function ownsJob(job: SlurmJob): boolean {
     return Boolean(selected.value && (slurm.value?.scope === 'mine' || job.user === selected.value.username));
 }
-function priorityKey(job: SlurmJob, profileId = selected.value?.id || ''): string { return `${profileId}:${job.cluster || ''}:${job.id}`; }
-function clearPriorities(profileId: string) {
-    for (const key of Object.keys(priorities))
-        if (key.startsWith(`${profileId}:`))
-            delete priorities[key];
+function canReadJobLog(job: SlurmJob): boolean {
+    return !job.cluster && (job.stateCode === 'R' || job.stateCode === 'RUNNING') && ownsJob(job);
 }
-async function requestPriority(job: SlurmJob) {
-    const profile = selected.value;
-    if (!profile || !connected.value)
-        return;
-    const key = priorityKey(job, profile.id);
-    const generation = connectionGenerations[profile.id] || 0;
-    await action(`priority:${key}`, async () => {
-        delete priorities[key];
-        try {
-            const result = await api!.getJobPriority(profile.id, job.id);
-            if ((connectionGenerations[profile.id] || 0) === generation && states[profile.id]?.status === 'connected')
-                priorities[key] = { value: result.priority, values: result.priorities };
-        }
-        catch (error) {
-            if ((connectionGenerations[profile.id] || 0) === generation)
-                priorities[key] = { error: cleanError(error) };
-            throw error;
-        }
+function openJobLog(job: SlurmJob, event: MouseEvent) {
+    if (!selected.value || !connected.value || !canReadJobLog(job)) return;
+    jobLogTrigger = event.currentTarget as HTMLButtonElement;
+    jobLog.value = { profileId: selected.value.id, jobId: job.id, jobName: job.name };
+}
+function closeJobLog(restoreFocus = true) {
+    jobLog.value = null;
+    const trigger = jobLogTrigger;
+    jobLogTrigger = null;
+    if (restoreFocus) void nextTick(() => {
+        if (trigger?.isConnected) trigger.focus({ preventScroll: true });
     });
 }
+function cancellationKey(job: SlurmJob, profileId = selected.value?.id || ''): string { return `prepareCancel:${profileId}:${job.cluster || ''}:${job.id}`; }
 async function requestJobCancellation(job: SlurmJob) {
     const profile = selected.value;
     if (!profile || !connected.value || !ownsJob(job))
         return;
     const generation = connectionGenerations[profile.id] || 0;
-    await action(`prepareCancel:${priorityKey(job, profile.id)}`, async () => {
+    await action(cancellationKey(job, profile.id), async () => {
         const result = await api!.prepareJobCancel(profile.id, job.id);
         if (selectedId.value !== profile.id || (connectionGenerations[profile.id] || 0) !== generation || states[profile.id]?.status !== 'connected')
             return;
@@ -651,12 +649,7 @@ async function cancelJobConfirmed() {
     const target = jobCancellation.value;
     if (!target || confirmationExpired.value)
         return;
-    if (await action('cancelJob', async () => {
-        await api!.cancelJob(target.profileId, target.preview.jobId, target.preview.token);
-        for (const key of Object.keys(priorities))
-            if (key.startsWith(`${target.profileId}:`) && key.endsWith(`:${target.preview.jobId}`))
-                delete priorities[key];
-    })) {
+    if (await action('cancelJob', () => api!.cancelJob(target.profileId, target.preview.jobId, target.preview.token))) {
         jobCancellation.value = null;
         notify(() => t("已取消作业 {0}", { "0": target.preview.jobId }));
     }
@@ -713,7 +706,7 @@ async function focusFirst() {
     const panel = activePanel();
     panel?.querySelector<HTMLInputElement>('input, button')?.focus();
 }
-function activePanel(): HTMLElement | null { return document.querySelector('.host-modal') || document.querySelector('.confirm-modal') || document.querySelector('.credential-modal') || document.querySelector('.drawer'); }
+function activePanel(): HTMLElement | null { return document.querySelector('.host-modal') || document.querySelector('.slurm-log-modal') || document.querySelector('.confirm-modal') || document.querySelector('.credential-modal') || document.querySelector('.drawer'); }
 function openDevice(profile?: Profile) {
     cancelConnectionTest();
     Object.assign(deviceDraft, clone(profile || freshProfile()), { jumpHosts: clone(profile?.jumpHosts || []) });
@@ -954,7 +947,9 @@ function keyHandler(event: KeyboardEvent) {
     if (event.key === 'Escape') {
         if (hostRequest.value)
             return;
-        if (jobCancellation.value && !busy.cancelJob)
+        if (jobLog.value)
+            closeJobLog();
+        else if (jobCancellation.value && !busy.cancelJob)
             jobCancellation.value = null;
         else if (tmpCleanup.value && !busy.cleanupTmp)
             tmpCleanup.value = null;
@@ -1060,7 +1055,6 @@ onMounted(() => {
             }
             if (previous?.status !== state.status && (previous?.status === 'connected' || state.status === 'connected')) {
                 connectionGenerations[state.profileId] = (connectionGenerations[state.profileId] || 0) + 1;
-                clearPriorities(state.profileId);
             }
             if (state.status !== 'connected') {
                 if (jobCancellation.value?.profileId === state.profileId && !busy.cancelJob)
@@ -1211,7 +1205,7 @@ onUnmounted(() => { cancelConnectionTest(); disposed = true; clearInterval(clock
           <div v-if="slurmInitialLoading" class="slurm-empty" data-testid="slurm-loading" role="status"><Icon name="refresh" :size="19" class="spinning" /><span>{{ t(slurmScope === 'mine' ? '正在读取个人作业…' : '正在读取全部作业…') }}</span></div>
           <div v-else-if="slurmJobs.length" class="slurm-table-wrap" tabindex="0" role="region" :aria-label="t('Slurm 作业列表，可横向滚动')">
             <table class="slurm-table" data-testid="slurm-table">
-              <thead><tr><th scope="col">{{ t('作业编号') }}</th><th scope="col">{{ t('分区') }}</th><th scope="col">{{ t('作业名称') }}</th><th scope="col">{{ t('用户') }}</th><th scope="col">{{ t('状态') }}</th><th scope="col">{{ t('已运行时间') }}</th><th scope="col">{{ t('节点数') }}</th><th scope="col">{{ t('节点列表') }}</th><th scope="col">{{ t('原因') }}</th><th scope="col">{{ t('权重') }}</th><th scope="col" class="align-right">{{ t('操作') }}</th></tr></thead>
+              <thead><tr><th scope="col">{{ t('作业编号') }}</th><th scope="col">{{ t('分区') }}</th><th scope="col">{{ t('作业名称') }}</th><th scope="col">{{ t('用户') }}</th><th scope="col">{{ t('状态') }}</th><th scope="col">{{ t('已运行时间') }}</th><th scope="col">{{ t('节点数') }}</th><th scope="col">{{ t('节点列表') }}</th><th scope="col">{{ t('原因') }}</th><th scope="col">{{ t('权重') }}</th><th scope="col"><div class="slurm-row-actions"><span>{{ t('日志') }}</span><span>{{ t('删除') }}</span></div></th></tr></thead>
               <tbody><tr v-for="job in slurmPageRows" :key="`${job.cluster || ''}:${job.id}:${job.partition}`">
                 <td class="slurm-job-id"><span :title="job.id">{{ job.id }}</span><small v-if="job.cluster" :title="job.cluster">{{ job.cluster }}</small></td>
                 <td><span class="slurm-cell-text" :title="job.partition">{{ job.partition || '—' }}</span></td>
@@ -1222,8 +1216,14 @@ onUnmounted(() => { cancelConnectionTest(); disposed = true; clearInterval(clock
                 <td class="slurm-node-count">{{ numberText(job.nodes) }}</td>
                 <td><span class="slurm-cell-text" :title="job.nodeList">{{ job.nodeList || '—' }}</span></td>
                 <td class="slurm-job-reason"><span :title="slurmReasonTitle(job)">{{ message(job.reasonLabel) || '—' }}</span></td>
-                <td class="slurm-priority"><button v-if="priorities[priorityKey(job)]?.value !== undefined" class="text-button priority-value" :data-testid="`job-priority-${job.id}`" :title="priorities[priorityKey(job)]?.values?.length ? t('各作业权重：{0}；点击重新读取', { '0': priorities[priorityKey(job)]?.values?.join('、') }) : t('点击重新读取权重')" :disabled="!connected || busy[`priority:${priorityKey(job)}`]" @click="requestPriority(job)">{{ priorities[priorityKey(job)]?.value === null ? priorities[priorityKey(job)]?.values?.length ? t("多值") : '—' : priorities[priorityKey(job)]?.value?.toLocaleString() }}</button><button v-else class="text-button" :data-testid="`job-priority-query-${job.id}`" :title="message(priorities[priorityKey(job)]?.error) || t('读取该作业的调度权重')" :disabled="!connected || busy[`priority:${priorityKey(job)}`]" @click="requestPriority(job)">{{ busy[`priority:${priorityKey(job)}`] ? t("读取中") : priorities[priorityKey(job)]?.error ? t("重试") : t("查看") }}</button></td>
-                <td class="align-right"><button v-if="ownsJob(job)" class="icon-button danger-hover" :data-testid="`job-cancel-${job.id}`" :title="t('删除自己的作业 {0}', { '0': job.id })" :aria-label="t('删除自己的作业 {0}', { '0': job.id })" :disabled="!connected || busy[`prepareCancel:${priorityKey(job)}`] || busy.cancelJob" @click="requestJobCancellation(job)"><Icon :name="busy[`prepareCancel:${priorityKey(job)}`] ? 'refresh' : 'trash'" :size="16" :class="{ spinning: busy[`prepareCancel:${priorityKey(job)}`] }" /></button><span v-else class="slurm-no-action">—</span></td>
+                <td class="slurm-priority" :data-testid="`job-priority-${job.id}`">{{ job.priority?.toLocaleString() ?? '—' }}</td>
+                <td>
+                  <div class="slurm-row-actions">
+                    <button v-if="canReadJobLog(job)" type="button" class="icon-button slurm-log-button" :data-testid="`job-log-${job.id}`" :title="t('查看作业 {0} 的日志', { '0': job.id })" :aria-label="t('查看作业 {0} 的日志', { '0': job.id })" aria-haspopup="dialog" :disabled="!connected" @click="openJobLog(job, $event)"><Icon name="file-text" :size="17" /></button>
+                    <button v-if="ownsJob(job)" class="icon-button danger-hover slurm-delete-button" :data-testid="`job-cancel-${job.id}`" :title="t('删除自己的作业 {0}', { '0': job.id })" :aria-label="t('删除自己的作业 {0}', { '0': job.id })" :disabled="!connected || busy[cancellationKey(job)] || busy.cancelJob" @click="requestJobCancellation(job)"><Icon :name="busy[cancellationKey(job)] ? 'refresh' : 'trash'" :size="16" :class="{ spinning: busy[cancellationKey(job)] }" /></button>
+                    <span v-else class="slurm-no-action">—</span>
+                  </div>
+                </td>
               </tr></tbody>
               <tfoot v-if="slurmCardHeight !== null" class="slurm-grid-fill" aria-hidden="true"><tr><td v-for="column in 11" :key="column" /></tr></tfoot>
             </table>
@@ -1251,6 +1251,8 @@ onUnmounted(() => { cancelConnectionTest(); disposed = true; clearInterval(clock
       <form v-if="drawer === 'device'" class="drawer-form" @submit.prevent="saveDevice"><div class="form-body"><JumpHostsEditor v-model="deviceDraft.jumpHosts!" :secrets="jumpSecrets" :disabled="Boolean(connectionTestId) || busy.save || !api" :testing="connectionTestTarget" :results="connectionTestResults" :pick-key="() => api!.pickKey()" @test="testConnection" @cancel="cancelConnectionTest" /><fieldset class="connection-fields" :disabled="Boolean(connectionTestId) || busy.save"><div class="form-section-title"><Icon name="server" :size="16" />{{ t('连接信息') }}</div><label class="field">{{ t('设备名称') }}<input v-model="deviceDraft.name" :placeholder="t('例如：训练服务器')" maxlength="80" required /></label><div class="form-row host-row"><label class="field">{{ t('服务器地址') }}<input v-model="deviceDraft.host" :placeholder="t('IP 地址或主机名')" maxlength="255" required /></label><label class="field">{{ t('端口') }}<input v-model.number="deviceDraft.port" type="number" min="1" max="65535" required /></label></div><label class="field">{{ t('用户名') }}<input v-model="deviceDraft.username" :placeholder="t('例如：user')" maxlength="128" required autocomplete="off" /></label><div class="form-section-title"><Icon name="shield" :size="16" />{{ t('认证方式') }}</div><div class="segmented-control"><button type="button" :class="{ active: deviceDraft.authType === 'key' }" @click="deviceDraft.authType = 'key'"><Icon name="key" :size="16" />{{ t('SSH 密钥') }}</button><button type="button" :class="{ active: deviceDraft.authType === 'password' }" @click="deviceDraft.authType = 'password'"><Icon name="lock" :size="16" />{{ t('密码') }}</button></div><template v-if="deviceDraft.authType === 'key'"><label class="field">{{ t('私钥文件') }}<div class="input-with-button"><input v-model="deviceDraft.keyPath" :placeholder="t('选择本机私钥文件')" required /><button type="button" class="icon-button" :title="t('选择私钥文件')" :aria-label="t('选择私钥文件')" @click="chooseKey()"><Icon name="folder" :size="18" /></button></div><small>{{ t('支持 OpenSSH 私钥，文件内容仅用于建立连接。') }}</small></label><label class="field">{{ t('密钥口令') }}<span class="field-optional">{{ t('可选') }}</span><input v-model="devicePassphrase" type="password" :placeholder="editing ? t('留空使用已有口令或未加密密钥') : t('私钥未加密时留空')" autocomplete="new-password" /></label></template><label v-else class="field">{{ t('连接密码') }}<div class="input-with-button"><input v-model="devicePassword" :type="passwordVisible ? 'text' : 'password'" :placeholder="editing ? t('留空保留已有密码') : t('可稍后在连接时输入')" autocomplete="new-password" /><button type="button" class="icon-button" :aria-label="passwordVisible ? t('隐藏密码') : t('显示密码')" @click="passwordVisible = !passwordVisible"><Icon name="eye" :size="17" /></button></div></label><label class="checkbox-row"><input v-model="rememberSecret" type="checkbox" /><span>{{ t(deviceDraft.authType === 'password' ? '记住密码' : '记住密钥口令') }}<small>{{ t('使用系统加密存储；不勾选则仅在本次运行中使用。') }}</small></span></label></fieldset><div class="target-connection-test"><button v-if="connectionTestTarget === 'target'" type="button" class="button secondary" @click="cancelConnectionTest">{{ t('取消测试') }}</button><button v-else type="button" class="button secondary" data-testid="test-target-connection" :disabled="Boolean(connectionTestId) || busy.save || !api" @click="testConnection()"><Icon name="link" :size="15" />{{ t('测试连接') }}</button><span v-if="connectionTestTarget === 'target'" role="status">{{ t('正在测试连接…') }}</span><small v-else-if="deviceDraft.jumpHosts?.length">{{ t('通过全部跳板机测试目标服务器。') }}</small></div><p v-if="connectionTestResults.target" class="connection-test-result" :class="{ error: connectionTestResults.target.error }" role="status">{{ message(connectionTestResults.target.text) }}</p><div class="form-section-title"><Icon name="activity" :size="16" />{{ t('连接与监测') }}</div><label class="checkbox-row"><input v-model="deviceDraft.autoReconnect" type="checkbox" /><span>{{ t('断线后自动重连') }}<small>{{ t('保留配置，关闭旧会话后按递增间隔恢复。') }}</small></span></label><label class="checkbox-row"><input v-model="deviceDraft.gpu.enabled" type="checkbox" /><span>{{ t('自动监测 NVIDIA 显卡') }}<small>{{ t('读取 nvidia-smi 与进程信息。') }}</small></span></label><label class="field inline-field">{{ t('检测间隔') }}<div><input v-model.number="deviceDraft.gpu.intervalSec" type="number" min="2" max="300" required /><span>{{ t('秒') }}</span></div></label><div class="form-note"><Icon name="info" :size="17" /><span>{{ t('首次连接需要确认服务器指纹。连接后，隧道和显卡监测会随设备独立运行。') }}</span></div><div v-if="formError" class="form-error" role="alert">{{ message(formError) }}</div></div><div class="drawer-footer"><button type="button" class="button secondary" @click="closeDrawer()">{{ t('取消') }}</button><button type="submit" data-testid="device-save" class="button primary" :disabled="busy.save || Boolean(connectionTestId)">{{ busy.save ? t("正在保存") : t("保存设备") }}<Icon name="check" :size="16" /></button></div></form>
       <form v-else class="drawer-form" @submit.prevent="saveTunnel"><div class="form-body"><div class="form-context"><Icon name="server" :size="16" />{{ selected?.name }}<span>{{ selected?.host }}</span></div><label class="field">{{ t('隧道名称') }}<span class="field-optional">{{ t('可选') }}</span><input v-model="tunnelDraft.name" :placeholder="t('例如：TensorBoard')" maxlength="80" /></label><label class="field">{{ t('转发方向') }}</label><div class="segmented-control"><button type="button" :class="{ active: tunnelDraft.direction === 'local' }" @click="tunnelDraft.direction = 'local'"><Icon name="arrow" :size="16" />{{ t('正向隧道') }}</button><button type="button" :class="{ active: tunnelDraft.direction === 'remote' }" @click="tunnelDraft.direction = 'remote'"><Icon name="exchange" :size="16" />{{ t('反向隧道') }}</button></div><div class="direction-explanation"><span>{{ tunnelDraft.direction === 'local' ? t("本机端口") : t("服务器端口") }}</span><Icon name="arrow" :size="16" /><span>SSH</span><Icon name="arrow" :size="16" /><span>{{ tunnelDraft.direction === 'local' ? t("远端服务") : t("本机侧服务") }}</span></div><div class="form-section-title"><Icon name="link" :size="16" />{{ tunnelDraft.direction === 'local' ? t("本机监听") : t("服务器监听") }}</div><div class="form-row host-row"><label class="field">{{ t('监听地址') }}<input v-model="tunnelDraft.bindHost" placeholder="127.0.0.1" required maxlength="255" /></label><label class="field">{{ t('监听端口') }}<input v-model.number="tunnelDraft.bindPort" type="number" min="1" max="65535" required /></label></div><div class="form-section-title"><Icon name="arrow" :size="16" />{{ tunnelDraft.direction === 'local' ? t("远端目标") : t("本机侧目标") }}</div><div class="form-row host-row"><label class="field">{{ t('目标地址') }}<input v-model="tunnelDraft.targetHost" placeholder="127.0.0.1" required maxlength="255" /></label><label class="field">{{ t('目标端口') }}<input v-model.number="tunnelDraft.targetPort" type="number" min="1" max="65535" required /></label></div><label class="field inline-field">{{ t('连通性检测间隔') }}<div><input v-model.number="tunnelDraft.healthIntervalSec" type="number" min="5" max="300" required /><span>{{ t('秒') }}</span></div></label><label class="checkbox-row"><input v-model="tunnelDraft.enabled" type="checkbox" /><span>{{ t('启用这条隧道') }}<small>{{ t('设备连接后自动建立；手动暂停后不会自动重启。') }}</small></span></label><div class="form-note"><Icon name="info" :size="17" /><span>{{ tunnelDraft.direction === 'remote' ? t("远端监听地址能否对外访问取决于服务器的转发权限。无法探测完整路径时，状态会显示未验证。") : t("目标地址从服务器一侧访问。目标服务未启动时会提示不可用，并继续检测。") }}</span></div><div v-if="formError" class="form-error" role="alert">{{ message(formError) }}</div></div><div class="drawer-footer"><button type="button" class="button secondary" @click="closeDrawer()">{{ t('取消') }}</button><button type="submit" data-testid="tunnel-save" class="button primary" :disabled="busy.save">{{ busy.save ? t("正在保存") : t("保存隧道") }}<Icon name="check" :size="16" /></button></div></form>
     </section></div></Transition>
+
+  <SlurmLogDialog v-if="jobLog && api" :api="api" :profile-id="jobLog.profileId" :job-id="jobLog.jobId" :job-name="jobLog.jobName" @close="closeJobLog()" />
 
   <div v-if="credentialProfile" class="modal-backdrop" @click.self="credentialProfile = null"><form class="modal credential-modal" role="dialog" aria-modal="true" aria-labelledby="credential-title" @submit.prevent="submitCredentials"><div class="modal-top"><span class="modal-icon blue"><Icon name="key" :size="25" /></span><button class="icon-button" type="button" :aria-label="t('关闭认证')" @click="credentialProfile = null"><Icon name="close" :size="19" /></button></div><h2 id="credential-title">{{ t('连接') }} {{ credentialProfile.name }}</h2><p>{{ credentialProfile.username }}@{{ credentialProfile.host }}:{{ credentialProfile.port }}</p><label v-if="credentialProfile.authType === 'password'" class="field">{{ t('连接密码') }}<input v-model="credentialPassword" type="password" :placeholder="t('输入密码，或留空使用已记住的密码')" autocomplete="current-password" /></label><label v-else class="field">{{ t('密钥口令') }}<input v-model="credentialPassphrase" type="password" :placeholder="t('未加密私钥可留空')" autocomplete="current-password" /></label><label class="checkbox-row"><input v-model="credentialRemember" type="checkbox" /><span>{{ t('使用系统加密记住凭据') }}</span></label><div v-for="(hop, index) in credentialProfile.jumpHosts || []" :key="hop.id" class="credential-hop"><strong>{{ t('跳板机 {n}', { n: index + 1 }) }} · {{ hop.username }}@{{ hop.host }}</strong><label class="field">{{ t(hop.authType === 'password' ? '连接密码' : '密钥口令') }}<input v-if="hop.authType === 'password'" v-model="credentialJumpSecrets[hop.id]!.password" type="password" :placeholder="t('输入密码，或留空使用已记住的密码')" autocomplete="current-password" /><input v-else v-model="credentialJumpSecrets[hop.id]!.passphrase" type="password" :placeholder="t('未加密私钥可留空')" autocomplete="current-password" /></label><label class="checkbox-row"><input v-model="credentialJumpSecrets[hop.id]!.remember" type="checkbox" /><span>{{ t('使用系统加密记住凭据') }}</span></label></div><div class="modal-actions"><button type="button" class="button secondary" @click="credentialProfile = null">{{ t('取消') }}</button><button type="submit" class="button primary"><Icon name="link" :size="16" />{{ t('连接') }}</button></div></form></div>
   <div v-if="deleting" class="modal-backdrop" @click.self="!busy.delete && (deleting = null)"><section class="modal confirm-modal" role="alertdialog" aria-modal="true" aria-labelledby="delete-title"><span class="modal-icon red"><Icon name="trash" :size="25" /></span><h2 id="delete-title">{{ t(deleting.kind === 'device' ? '移除设备？' : '移除隧道？') }}</h2><p>{{ t(deleting.kind === 'device' ? '「{name}」的连接会先关闭，然后移除设备配置。' : '「{name}」的转发会先停止，然后移除隧道配置。', { name: deleting.name }) }}</p><div class="modal-actions"><button class="button secondary" :disabled="busy.delete" @click="deleting = null">{{ t('取消') }}</button><button class="button danger" :disabled="busy.delete" @click="deleteConfirmed()">{{ busy.delete ? t("正在移除") : t("确认移除") }}</button></div></section></div>

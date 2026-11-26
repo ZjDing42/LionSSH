@@ -2,8 +2,9 @@
 //!
 //! Renderer input can select an operation, a validated job ID, or a one-use
 //! confirmation token. It can never supply a remote command or shell fragment.
-use crate::ssh::Executor;
 use crate::gpu_process::{self, StopTicket};
+use crate::ssh::Executor;
+use base64::{engine::general_purpose::STANDARD, Engine};
 use regex::Regex;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -19,6 +20,7 @@ const GPU_QUERY: &str = "nvidia-smi --query-gpu=index,uuid,name,memory.total,mem
 const COMPUTE_QUERY: &str = "nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_memory --format=csv,noheader,nounits";
 const SUMMARY_QUERY: &str = "nvidia-smi";
 const MAX_OUTPUT: usize = 4_194_304;
+const JOB_LOG_LIMIT: usize = 1_048_576;
 const SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const TOKEN_LIFETIME: u64 = 60_000;
 type Events = Arc<dyn Fn(&str, Value) + Send + Sync>;
@@ -350,9 +352,11 @@ fn summarize_gpu(
     json!({"cards":cards,"idleCount":idle_count,"total":rows.len()})
 }
 
+const SQUEUE_COMMAND: &str = "squeue -o '%Q|%u|%.18i %.9P %.8j %.8u %.2t %.10M %.6D %R'";
+
 fn squeue_command(username: &str, scope: &str) -> Result<String, String> {
     if scope == "all" {
-        return Ok("squeue".into());
+        return Ok(SQUEUE_COMMAND.into());
     }
     if scope != "mine" {
         return Err("作业查询范围不正确".into());
@@ -368,7 +372,7 @@ fn squeue_command(username: &str, scope: &str) -> Result<String, String> {
     } else {
         quote(username)
     };
-    Ok(format!("squeue -u {value}"))
+    Ok(format!("{SQUEUE_COMMAND} -u {value}"))
 }
 fn translate_state(code: &str) -> (&'static str, &'static str) {
     let code = code.to_uppercase();
@@ -605,6 +609,8 @@ fn parse_squeue(output: &str) -> Result<Vec<Value>, String> {
     let mut jobs = Vec::new();
     let mut columns: Option<Vec<(usize, Option<usize>)>> = None;
     let mut saw_header = false;
+    let mut has_priority = false;
+    let mut has_full_user = false;
     let mut cluster = String::new();
     let tokens = re(r"\S+");
     let loose = re(
@@ -619,8 +625,28 @@ fn parse_squeue(output: &str) -> Result<Vec<Value>, String> {
             columns = None;
             continue;
         }
+        if re(r"(?i)^\s*squeue:\s*warning\b").is_match(line) {
+            continue;
+        }
+        let priority_header = line.strip_prefix("PRIORITY|");
+        let (line, priority, full_user) = if let Some(header) = priority_header {
+            (header.strip_prefix("USER|").unwrap_or(header), None, None)
+        } else if columns.is_some() && has_priority {
+            let (priority, row) = line.split_once('|').ok_or("squeue 作业行格式无法识别")?;
+            let (full_user, row) = if has_full_user {
+                let (user, row) = row.split_once('|').ok_or("squeue 作业行格式无法识别")?;
+                (Some(user.trim()), row)
+            } else {
+                (None, row)
+            };
+            (row, priority.trim().parse::<u32>().ok(), full_user)
+        } else {
+            (line, None, None)
+        };
         let fields = tokens.find_iter(line).collect::<Vec<_>>();
         if fields.len() == 8 && fields.iter().zip(HEADER).all(|(a, b)| a.as_str() == b) {
+            has_priority = priority_header.is_some();
+            has_full_user = priority_header.is_some_and(|header| header.starts_with("USER|"));
             columns = Some(
                 fields
                     .iter()
@@ -643,9 +669,6 @@ fn parse_squeue(output: &str) -> Result<Vec<Value>, String> {
                     .collect(),
             );
             saw_header = true;
-            continue;
-        }
-        if re(r"(?i)^\s*squeue:\s*warning\b").is_match(line) {
             continue;
         }
         let Some(ref columns) = columns else {
@@ -686,8 +709,8 @@ fn parse_squeue(output: &str) -> Result<Vec<Value>, String> {
             reason_code = c[2].trim().into();
         }
         let (label, tone) = translate_state(&fields[4]);
-        let mut job = json!({"id":fields[0],"partition":fields[1],"name":fields[2],"user":fields[3],"stateCode":fields[4],"stateLabel":label,"stateTone":tone,"elapsed":fields[5],
-          "nodes":fields[6].parse::<u64>().ok(),"nodeList":if node_list=="(null)"{""}else{&node_list},"reasonCode":reason_code,"reasonLabel":translate_reason(&reason_code)});
+        let mut job = json!({"id":fields[0],"partition":fields[1],"name":fields[2],"user":full_user.unwrap_or(&fields[3]),"stateCode":fields[4],"stateLabel":label,"stateTone":tone,"elapsed":fields[5],
+          "nodes":fields[6].parse::<u64>().ok(),"nodeList":if node_list=="(null)"{""}else{&node_list},"reasonCode":reason_code,"reasonLabel":translate_reason(&reason_code),"priority":priority});
         if !cluster.is_empty() {
             job["cluster"] = json!(cluster);
         }
@@ -784,6 +807,27 @@ struct JobInfo {
     het_offset: Option<String>,
     priority: Option<u64>,
 }
+impl JobInfo {
+    fn matches(&self, requested: &JobId) -> bool {
+        match requested.kind {
+            "job" => {
+                self.id == requested.base
+                    || self.array_job.as_deref() == Some(&requested.base)
+                    || self.het_job.as_deref() == Some(&requested.base)
+            }
+            "array-group" => self.array_job.as_deref() == Some(&requested.base),
+            "array" => {
+                self.array_job.as_deref() == Some(&requested.base)
+                    && self.array_task == requested.array_task
+            }
+            "heterogeneous" => {
+                self.het_job.as_deref() == Some(&requested.base)
+                    && self.het_offset == requested.component
+            }
+            _ => false,
+        }
+    }
+}
 fn parse_job_info(output: &str) -> Result<Vec<JobInfo>, String> {
     if output.len() > MAX_OUTPUT {
         return Err("作业详情输出不正确".into());
@@ -849,27 +893,8 @@ fn assert_owned_info(output: &str, requested: &JobId, username: &str) -> Result<
     if records.iter().map(|v| &v.uid).collect::<HashSet<_>>().len() != 1 {
         return Err("作业所属用户信息不一致".into());
     }
-    for record in &records {
-        let matches = match requested.kind {
-            "job" => {
-                record.id == requested.base
-                    || record.array_job.as_deref() == Some(&requested.base)
-                    || record.het_job.as_deref() == Some(&requested.base)
-            }
-            "array-group" => record.array_job.as_deref() == Some(&requested.base),
-            "array" => {
-                record.array_job.as_deref() == Some(&requested.base)
-                    && record.array_task == requested.array_task
-            }
-            "heterogeneous" => {
-                record.het_job.as_deref() == Some(&requested.base)
-                    && record.het_offset == requested.component
-            }
-            _ => false,
-        };
-        if !matches {
-            return Err("服务器返回的作业 ID 与所选作业不一致".into());
-        }
+    if records.iter().any(|record| !record.matches(requested)) {
+        return Err("服务器返回的作业 ID 与所选作业不一致".into());
     }
     let first = &records[0];
     Ok(OwnedInfo {
@@ -882,28 +907,108 @@ fn assert_owned_info(output: &str, requested: &JobId, username: &str) -> Result<
         },
     })
 }
-fn parse_priorities(output: &str) -> Result<Vec<u64>, String> {
-    let lines = output
-        .trim()
-        .lines()
-        .filter(|v| !v.is_empty())
-        .collect::<Vec<_>>();
-    if lines.is_empty() || lines.len() > 100_000 {
-        return Err("服务器没有返回作业权重".into());
+
+fn job_log_paths<'a>(
+    output: &'a str,
+    id: &JobId,
+    username: &str,
+) -> Result<[Option<&'a str>; 2], String> {
+    let records = parse_job_info(output)?;
+    let [record] = records.as_slice() else {
+        return Err("请先选择一个具体的 Slurm 作业任务".into());
+    };
+    if !record.matches(id) || record.owner != username {
+        return Err("只能查看自己正在运行的 Slurm 作业日志".into());
     }
-    let regex = re(r"^Priority=([0-9]+)$");
-    lines
-        .iter()
-        .map(|line| {
-            regex
-                .captures(line.trim())
-                .and_then(|c| c[1].parse::<u64>().ok())
-                .filter(|v| *v <= SAFE_INTEGER)
-                .ok_or_else(|| "作业权重输出格式不正确".into())
-        })
-        .collect()
+    let state_pattern = re(r"(?m)^[ \t]*JobState=([^\s]+)");
+    let mut states = state_pattern.captures_iter(output);
+    let state = states.next().and_then(|state| state.get(1)).map(|state| state.as_str());
+    if state != Some("RUNNING") || states.next().is_some() {
+        return Err("只能查看自己正在运行的 Slurm 作业日志".into());
+    }
+    // Multiline scontrol output gives each path its own line, including spaces.
+    let path = |key: &str| -> Result<Option<&str>, String> {
+        let mut fields = output
+            .lines()
+            .filter_map(|line| line.trim_start().strip_prefix(key));
+        let value = fields.next();
+        if fields.next().is_some() || value.is_some_and(|value| value.chars().any(char::is_control)) {
+            return Err("Slurm 返回的日志路径无法识别".into());
+        }
+        match value {
+            None | Some("" | "(null)" | "None" | "N/A") => Ok(None),
+            Some(value) if value.starts_with('/') => Ok(Some(value)),
+            _ => Err("Slurm 返回的日志路径无法识别".into()),
+        }
+    };
+    let stdout = path("StdOut=")?;
+    Ok([stdout, path("StdErr=")?.or(stdout)])
 }
 
+const READ_JOB_LOG: &str = r#"path=$1
+offset=$2
+previous=$3
+limit=$4
+if [ ! -e "$path" ]; then printf 'MISSING\n'; exit; fi
+if [ ! -f "$path" ] || [ ! -r "$path" ]; then printf 'UNREADABLE\n'; exit; fi
+exec 3< "$path" || exit 1
+[ -f /proc/self/fd/3 ] || exit 1
+metadata=$(stat -Lc '%d:%i %s' -- /proc/self/fd/3) || exit 1
+identity=${metadata% *}
+size=${metadata##* }
+if [ "$identity" != "$previous" ] || [ "$offset" -gt "$size" ] || [ "$((size - offset))" -gt "$limit" ]; then
+    offset=$(( size > limit ? size - limit : 0 ))
+    reset=1
+else
+    reset=0
+fi
+printf '%s %s %s\n' "$identity" "$offset" "$reset"
+dd if=/proc/self/fd/3 iflag=skip_bytes,count_bytes skip="$offset" count="$((size - offset))" bs=65536 status=none | base64 -w0
+"#;
+
+fn job_log_file_id(value: &str) -> bool {
+    value.split_once(':').is_some_and(|(device, inode)| {
+        [device, inode].iter().all(|part| {
+            !part.is_empty() && part.len() <= 20 && part.bytes().all(|byte| byte.is_ascii_digit())
+        })
+    })
+}
+
+fn job_log_response(output: &str, shared: bool) -> Result<Value, String> {
+    let (header, data) = output.split_once('\n').ok_or("Slurm 日志读取结果无效")?;
+    let status = match header {
+        "MISSING" => "missing",
+        "UNREADABLE" => "unreadable",
+        _ => {
+            let mut fields = header.split_whitespace();
+            let file_id = fields
+                .next()
+                .filter(|value| job_log_file_id(value))
+                .ok_or("Slurm 日志读取结果无效")?;
+            let start: u64 = fields
+                .next()
+                .and_then(|value| value.parse().ok())
+                .ok_or("Slurm 日志读取结果无效")?;
+            let reset = match fields.next() {
+                Some("1") => true,
+                Some("0") => false,
+                _ => return Err("Slurm 日志读取结果无效".into()),
+            };
+            let length = STANDARD.decode(data).map_err(|_| "Slurm 日志读取结果无效")?.len() as u64;
+            if fields.next().is_some()
+                || length > JOB_LOG_LIMIT as u64
+                || start.saturating_add(length) > SAFE_INTEGER
+            {
+                return Err("Slurm 日志读取结果无效".into());
+            }
+            return Ok(json!({
+                "status": "ready", "data": data, "cursor": {"fileId": file_id, "offset": start + length},
+                "reset": reset, "truncated": reset && start > 0, "shared": shared,
+            }));
+        }
+    };
+    Ok(json!({"status": status, "shared": shared}))
+}
 fn home_path(username: &str) -> Result<String, String> {
     if username.is_empty()
         || username.chars().count() > 80
@@ -1699,7 +1804,7 @@ impl Monitor {
         state["nextPollAt"] = json!(now() + 300_000);
         self.emit("storage", &state);
     }
-    async fn check_job(&self, job_id: &str, epoch: u64) -> Result<(), String> {
+    async fn check_job(&self, job_id: &str, epoch: u64) -> Result<Value, String> {
         self.connected()?;
         if !self.slurm_enabled {
             return Err("SSH 未连接或 Slurm 操作已禁用".into());
@@ -1726,7 +1831,7 @@ impl Monitor {
         if rows.len() != 1 || rows[0]["cluster"].as_str().is_some_and(|v| !v.is_empty()) {
             return Err("请从当前服务器的最新作业列表中选择作业".into());
         }
-        Ok(())
+        Ok(rows[0].clone())
     }
     async fn token(&self, confirmation: Confirmation, max: usize) -> String {
         let mut tokens = self.tokens.lock().await;
@@ -1748,9 +1853,8 @@ impl Monitor {
         self.connected()?;
         match method {
             "prepare-gpu-process-stop" | "stop-gpu-process" => self.gpu_process_action(method, args).await,
-            "prepare-job-cancel" | "cancel-job" | "get-job-priority" => {
-                self.job_action(method, args).await
-            }
+            "prepare-job-cancel" | "cancel-job" => self.job_action(method, args).await,
+            "read-job-log" => self.read_job_log(args).await,
             "prepare-tmp-cleanup" | "cleanup-tmp" => self.storage_action(method, args).await,
             _ => Err("不支持的远程操作".into()),
         }
@@ -1794,6 +1898,56 @@ impl Monitor {
             started:live["startTicks"].as_str().unwrap_or("").parse().map_err(|_| "进程已变化，请重新确认")?, expires });
         Ok(json!({"token":token,"expiresAt":expires,"pid":pid,"username":live["username"],"name":process["name"]}))
     }
+    async fn read_job_log(&self, args: &[Value]) -> Result<Value, String> {
+        let job_id = args
+            .first()
+            .and_then(Value::as_str)
+            .ok_or("作业 ID 格式不正确")?;
+        let id = validate_job_id(job_id)?;
+        let stream = match args.get(1).and_then(Value::as_str) {
+            Some("stdout") => 0,
+            Some("stderr") => 1,
+            _ => return Err("Slurm 日志类型无效".into()),
+        };
+        let (file_id, offset) = match args.get(2) {
+            None | Some(Value::Null) => ("", 0),
+            Some(cursor) => {
+                let file_id = cursor["fileId"]
+                    .as_str()
+                    .filter(|value| job_log_file_id(value))
+                    .ok_or("Slurm 日志位置无效")?;
+                let offset = cursor["offset"]
+                    .as_u64()
+                    .filter(|value| *value <= SAFE_INTEGER)
+                    .ok_or("Slurm 日志位置无效")?;
+                (file_id, offset)
+            }
+        };
+        let epoch = self.slurm_epoch.load(Ordering::SeqCst);
+        let row = self.check_job(job_id, epoch).await?;
+        if !matches!(row["stateCode"].as_str(), Some("R" | "RUNNING")) {
+            return Err("只能查看自己正在运行的 Slurm 作业日志".into());
+        }
+        let username = text(&*self.profile.lock().await, "username");
+        let details = self
+            .exec(&id.info_command(), false)
+            .await
+            .map_err(|error| error.message)?;
+        let paths = job_log_paths(&details, &id, &username)?;
+        let shared = paths[0].is_some() && paths[0] == paths[1];
+        self.check_job(job_id, epoch).await?;
+        let Some(path) = paths[stream].filter(|path| *path != "/dev/null") else {
+            return Ok(json!({"status": "unconfigured", "shared": false}));
+        };
+        let command = format!(
+            "bash -o pipefail -c {} -- {} {offset} {} {JOB_LOG_LIMIT}",
+            quote(READ_JOB_LOG), quote(path), quote(file_id),
+        );
+        let output = self.exec(&command, false).await.map_err(|error| error.message)?;
+        self.check_job(job_id, epoch).await?;
+        job_log_response(&output, shared)
+    }
+
     async fn job_action(&self, method: &str, args: &[Value]) -> Result<Value, String> {
         let job_id = args
             .first()
@@ -1805,18 +1959,6 @@ impl Monitor {
         let _gate = self.job_gate.lock().await;
         self.check_job(job_id, epoch).await?;
         let username = text(&*self.profile.lock().await, "username");
-        if method == "get-job-priority" {
-            let command = format!("{} | grep -o 'Priority=[0-9]*'", id.info_command());
-            let output = self.exec(&command, false).await.map_err(|e| e.message)?;
-            self.check_job(job_id, epoch).await?;
-            let priorities = parse_priorities(&output)?;
-            let priority = if priorities.iter().all(|v| *v == priorities[0]) {
-                Some(priorities[0])
-            } else {
-                None
-            };
-            return Ok(json!({"jobId":job_id,"priority":priority,"priorities":priorities}));
-        }
         let prepared = if method == "cancel-job" {
             // Consume before any await or mutation: a network failure cannot replay cancellation.
             let token = args.get(1).and_then(Value::as_str).unwrap_or("");
@@ -2176,11 +2318,11 @@ mod tests {
         );
         assert_eq!(
             squeue_command("tester", "mine").unwrap(),
-            "squeue -u tester"
+            format!("{SQUEUE_COMMAND} -u tester")
         );
         assert_eq!(
             squeue_command("a; id", "mine").unwrap(),
-            "squeue -u 'a; id'"
+            format!("{SQUEUE_COMMAND} -u 'a; id'")
         );
         assert!(squeue_command("test\nid", "mine").is_err());
     }
@@ -2278,21 +2420,23 @@ mod tests {
         .is_err());
     }
     #[test]
-    fn priorities_are_numeric_safe_integers_only() {
-        assert_eq!(
-            parse_priorities("Priority=0\nPriority=4294967295\n").unwrap(),
-            vec![0, 4294967295]
+    fn slurm_reads_priority_with_each_job_and_keeps_other_fields_when_missing() {
+        let output = queue();
+        let mut lines = output.lines();
+        let header = lines.next().unwrap();
+        let running = lines.next().unwrap();
+        let pending = lines.next().unwrap();
+        let output = format!(
+            "PRIORITY|USER|{header}\n0|research_user_long|{running}\n4294967295|tester|{pending}\nCLUSTER: remote\nPRIORITY|{header}\nN/A|{pending}\n"
         );
-        for value in [
-            "",
-            "Priority=unknown",
-            "SomePriority=42",
-            "Priority=4 trailing",
-            "Priority=-1",
-            "Priority=9007199254740992",
-        ] {
-            assert!(parse_priorities(value).is_err());
-        }
+        let jobs = parse_squeue(&output).unwrap();
+        assert_eq!(jobs[0]["priority"], 0);
+        assert_eq!(jobs[0]["user"], "research_user_long");
+        assert_eq!(jobs[0]["nodeList"], "gpu[01-02]");
+        assert_eq!(jobs[1]["priority"], 4294967295u64);
+        assert_eq!(jobs[2]["cluster"], "remote");
+        assert_eq!(jobs[2]["priority"], Value::Null);
+        assert_eq!(jobs[2]["reasonCode"], "Resources");
     }
     #[test]
     fn storage_aggregates_allocated_bytes_and_partial_results_strictly() {
@@ -2779,7 +2923,7 @@ mod tests {
         assert!(executor.commands.lock().await.is_empty());
         assert!(monitor.initialize_slurm_scope("invalid").await.is_err());
         monitor.refresh_slurm().await;
-        assert_eq!(executor.commands.lock().await.as_slice(), &["squeue"]);
+        assert_eq!(executor.commands.lock().await.as_slice(), &[SQUEUE_COMMAND]);
     }
     #[tokio::test]
     async fn slurm_scope_change_retains_capability_but_clears_old_scope_results() {

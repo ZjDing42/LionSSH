@@ -9,7 +9,8 @@ const { randomUUID } = require('node:crypto');
 const { chromium } = require('playwright');
 const { localSshServer, echoServer, freePort, roundTrip } = require('../tests/helpers/local-ssh.cjs');
 const { profile, tunnel, delay } = require('../tests/helpers/fixtures.cjs');
-const { mineQueue, allQueue } = require('../tests/helpers/slurm-output.cjs');
+const { mineQueue, allQueue, queueCommand } = require('../tests/helpers/slurm-output.cjs');
+const { makeSummary } = require('../tests/helpers/nvidia-summary.cjs');
 const { probeText, verifyTerminalRendering, verifyTerminalClipboard } = require('../tests/helpers/terminal-rendering.cjs');
 
 const root = path.resolve(__dirname, '..');
@@ -199,7 +200,20 @@ async function main() {
   const id = 'desktop-smoke-device';
   try {
     const password = `fixture-${randomUUID()}`;
-    ssh = await localSshServer({ password, terminalEnabled: true, squeueResponse: command => command === 'squeue' ? allQueue : mineQueue, storageResponse: 'LION_STORAGE_V1\t1000\nHOME\t4096\t3\t2\t0\nTMP\t8192\t4\t3\t0\n' });
+    ssh = await localSshServer({
+      password,
+      terminalEnabled: true,
+      summaryOutput: makeSummary({
+        cards: [
+          { index: 0, name: 'NVIDIA Test Card', memoryUsedMiB: 19, memoryTotalMiB: 24576, utilization: 0 },
+          { index: 1, name: 'NVIDIA Test Card', memoryUsedMiB: 8192, memoryTotalMiB: 24576, utilization: 0 },
+        ],
+        processes: [{ index: 1, pid: 4242, type: 'C', name: 'training', memory: 8192 }],
+      }),
+      gpuProcessResponse: () => 'LION_GPU_PROCESSES_V1\t1000\nPROCESS\t4242\t1000\ttester\t60\t777\nEND\n',
+      squeueResponse: command => command === queueCommand ? allQueue : mineQueue,
+      storageResponse: 'LION_STORAGE_V1\t1000\nHOME\t4096\t3\t2\t0\nTMP\t8192\t4\t3\t0\n',
+    });
     echo = await echoServer();
     const localPort = await freePort();
     const remotePort = await freePort();
@@ -250,6 +264,8 @@ async function main() {
     assert.equal(state.gpu.total, 2);
     assert.equal(state.gpu.idleCount, 1);
     assert.equal(state.slurm.jobs.length, 2);
+    assert.deepEqual(state.slurm.jobs.map(job => job.priority), [3427, 0]);
+    assert.equal(await app.page.getByTestId('job-priority-4201').innerText(), '3,427');
     assert.equal(state.storage.totalBytes, 12288);
     report.savedCredentialDecryptsAfterRestart = true;
     report.hostTrustUi = true;

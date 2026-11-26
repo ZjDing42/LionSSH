@@ -153,13 +153,17 @@ Slurm 作业查询已启用|Slurm job monitoring enabled
 作业所属用户信息不一致|The job owner information does not match
 作业所属用户已变化，请重新确认|The job owner changed; confirm again
 作业数组范围不正确|Invalid job array range
-作业权重输出格式不正确|Invalid job priority output format
 作业详情字段不明确|Ambiguous job detail fields
 作业详情输出不正确|Invalid job detail output
 只能删除当前登录用户自己的作业|Only jobs owned by the current SSH user can be cancelled
+只能查看自己正在运行的 Slurm 作业日志|Logs are available only for running Slurm jobs owned by the current SSH user
+请先选择一个具体的 Slurm 作业任务|Select an individual Slurm job task
+Slurm 返回的日志路径无法识别|Slurm returned an unrecognized log path
+Slurm 日志读取结果无效|Invalid Slurm log response
+Slurm 日志类型无效|Invalid Slurm log type
+Slurm 日志位置无效|Invalid Slurm log position
 删除确认已失效，请重新确认|The cancellation confirmation has expired; confirm again
 无法可靠确认作业所属用户|Cannot reliably verify the job owner
-服务器没有返回作业权重|The server returned no job priority
 服务器返回的作业 ID 与所选作业不一致|The job ID returned by the server does not match the selected job
 请从当前服务器的最新作业列表中选择作业|Select a job from this server's current job list
 连接已变化，请刷新作业列表后重试|The connection changed; refresh the job list and retry

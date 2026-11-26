@@ -2,6 +2,7 @@
 withDefaults(defineProps<{ name: string; size?: number }>(), { size: 20 });
 const paths: Record<string, string[]> = {
   file: ['M5 3h9l5 5v13H5z', 'M14 3v6h5'],
+  'file-text': ['M5 3h9l5 5v13H5z', 'M14 3v6h5M8 13h8m-8 4h8'],
   upload: ['M12 16V3m-5 5 5-5 5 5M4 16v5h16v-5'],
   'folder-plus': ['M3 7V4h6l3 3h9v13H3z', 'M12 10v7m-3-3h6'],
   'file-plus': ['M5 3h9l5 5v13H5z', 'M12 11v7m-3-3h6'],
